@@ -1,11 +1,12 @@
 import { OrganizerGalleryApp } from '../../../../src/OrganizerGalleryApp';
 
 interface OrganizerGalleryPageProps {
-  params: {
+  params: Promise<{
     id: string;
-  };
+  }>;
 }
 
-export default function OrganizerGalleryPage({ params }: OrganizerGalleryPageProps) {
-  return <OrganizerGalleryApp eventId={params.id} />;
+export default async function OrganizerGalleryPage({ params }: OrganizerGalleryPageProps) {
+  const { id } = await params;
+  return <OrganizerGalleryApp eventId={id} />;
 }

@@ -1,11 +1,12 @@
 import { GuestExperience } from '../../../src/guest/GuestExperience';
 
 interface GuestEventPageProps {
-  params: {
+  params: Promise<{
     slug: string;
-  };
+  }>;
 }
 
-export default function GuestEventPage({ params }: GuestEventPageProps) {
-  return <GuestExperience slug={params.slug} />;
+export default async function GuestEventPage({ params }: GuestEventPageProps) {
+  const { slug } = await params;
+  return <GuestExperience slug={slug} />;
 }

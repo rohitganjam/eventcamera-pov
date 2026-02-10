@@ -485,7 +485,7 @@ export function OrganizerShell() {
                 <Label htmlFor="compression-mode">Compression mode</Label>
                 <Select
                   value={form.compressionMode}
-                  onValueChange={(value) =>
+                  onValueChange={(value: string) =>
                     setForm((current) => ({
                       ...current,
                       compressionMode: value as CompressionMode

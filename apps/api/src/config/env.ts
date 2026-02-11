@@ -1,5 +1,6 @@
 const DEFAULT_PORT = 3000;
 const DEFAULT_SIGNED_URL_TTL_SECONDS = 15 * 60;
+const DEFAULT_GUEST_WEB_BASE_URL = 'https://guest.eventpovcamera.app';
 
 function parseBoolean(input: string | undefined, fallback: boolean): boolean {
   if (!input) return fallback;
@@ -41,6 +42,18 @@ function parseCsv(input: string | undefined): string[] {
     .filter((value) => value.length > 0);
 }
 
+function parseBaseUrl(input: string | undefined, fallback: string): string {
+  const source = (input ?? fallback).trim();
+  if (!source) return fallback;
+
+  try {
+    const normalized = new URL(source).origin;
+    return normalized.replace(/\/+$/, '');
+  } catch {
+    return fallback;
+  }
+}
+
 function requireEnv(name: string): string {
   const value = process.env[name];
   if (!value) {
@@ -80,5 +93,6 @@ export const env = {
     process.env.SIGNED_URL_TTL_SECONDS,
     DEFAULT_SIGNED_URL_TTL_SECONDS
   ),
-  corsAllowedOrigins: parseCsv(process.env.CORS_ALLOWED_ORIGINS)
+  corsAllowedOrigins: parseCsv(process.env.CORS_ALLOWED_ORIGINS),
+  guestWebBaseUrl: parseBaseUrl(process.env.GUEST_WEB_BASE_URL, DEFAULT_GUEST_WEB_BASE_URL)
 };

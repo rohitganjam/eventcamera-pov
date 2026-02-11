@@ -111,6 +111,7 @@ interface PaymentRedirectResponse {
 
 const DEFAULT_CURRENCY = 'INR';
 const DEFAULT_COMPRESSION_MODE: CompressionMode = 'compressed';
+const MAX_EVENT_SLUG_LENGTH = 32;
 const OPEN_EARLY_BUFFER_HOURS = 13;
 const CLOSE_LATE_BUFFER_HOURS = 13;
 const ZIP_SPLIT_FILE_COUNT = 1_000;
@@ -216,13 +217,14 @@ function hashPin(pin: string): string {
   return createHash('sha256').update(pin).digest('hex');
 }
 
-function slugify(value: string): string {
+function slugify(value: string, maxLength = MAX_EVENT_SLUG_LENGTH): string {
   return value
     .trim()
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
-    .slice(0, 64);
+    .slice(0, maxLength)
+    .replace(/^-+|-+$/g, '');
 }
 
 function toIsoDate(value: Date | string): string {
@@ -278,7 +280,7 @@ function resolveEventStatus(eventDate: string, endDate: string): EventStatus {
 }
 
 function buildGuestUrl(slug: string): string {
-  return `https://guest.eventpovcamera.app/e/${slug}`;
+  return `${env.guestWebBaseUrl}/e/${slug}`;
 }
 
 function buildArchiveDownloadUrl(eventId: string, jobId: string, part?: number): string {
@@ -420,13 +422,17 @@ function eventSettingsLocked(event: DbEventRow): boolean {
 }
 
 async function generateUniqueSlug(name: string, client: PoolClient): Promise<string> {
-  const base = slugify(name) || `event-${randomUUID().slice(0, 8)}`;
-
-  let candidate = base;
-  let counter = 1;
+  const base = slugify(name) || slugify(`event-${randomUUID().slice(0, 8)}`);
+  let counter = 0;
 
   // Keep probing until a free slug is found.
   for (; ;) {
+    const suffix = counter > 0 ? `-${counter}` : '';
+    const maxBaseLength = Math.max(0, MAX_EVENT_SLUG_LENGTH - suffix.length);
+    const basePart = slugify(base, maxBaseLength);
+    const fallbackPart = maxBaseLength > 0 ? 'event'.slice(0, maxBaseLength) : '';
+    const candidate = `${basePart || fallbackPart}${suffix}`;
+
     const existsResult = await client.query<{ id: string }>(
       'SELECT id FROM events WHERE slug = $1 LIMIT 1',
       [candidate]
@@ -436,7 +442,6 @@ async function generateUniqueSlug(name: string, client: PoolClient): Promise<str
       return candidate;
     }
 
-    candidate = `${base}-${counter}`;
     counter += 1;
   }
 }
@@ -852,7 +857,7 @@ class OrganizerService {
 
         const thumbUrl = thumbPath
           ? await createSignedStorageObjectUrl(bucket, thumbPath)
-          : `https://guest.eventpovcamera.app/e/${eventId}/missing-thumb`;
+          : `${env.guestWebBaseUrl}/e/${eventId}/missing-thumb`;
 
         return {
           media_id: item.media_id,

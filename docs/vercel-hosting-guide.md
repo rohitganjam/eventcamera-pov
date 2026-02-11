@@ -79,6 +79,7 @@ Set environment variables:
 - `SUPABASE_STORAGE_THUMBS_BUCKET=thumbs`
 - `SUPABASE_STORAGE_ARCHIVE_BUCKET=archives`
 - `SIGNED_URL_TTL_SECONDS=900`
+- `GUEST_WEB_BASE_URL=https://guest.eventpovcamera.app`
 
 Add custom domain:
 

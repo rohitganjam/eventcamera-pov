@@ -91,6 +91,12 @@ The API is an Express app. On Vercel, run it as a serverless HTTP function (not 
 If you have not already added a Vercel serverless entrypoint for `apps/api`, do that before production rollout.
 The runtime is stateless/ephemeral, so in-process timers are not reliable.
 
+This repo includes the entrypoint at:
+
+- `apps/api/api/[...path].ts`
+
+So routes like `/api/health` are handled by the Express app.
+
 ## Cron strategy (recommended)
 
 Use **Supabase cron** to call the internal API sync endpoint, not in-process timers:

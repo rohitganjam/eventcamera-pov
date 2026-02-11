@@ -22,7 +22,7 @@ All guest UI implementations must follow these non-optional guidelines:
 
 A guest is identified by a single `HttpOnly` secure cookie containing a `device_session_token`. This cookie is set on the first visit when the guest joins an event.
 
-- **Cookie:** `HttpOnly`, `Secure`, `SameSite=Strict`, `Path=/api`. Use a host-only cookie on `guest.eventpovcam.app` (do not set `Domain=.eventpovcam.app`). This is the **only** identity mechanism. It is sent automatically with every API request. JavaScript cannot read or modify it.
+- **Cookie:** `HttpOnly`, `Secure`, `SameSite=Strict`, `Path=/api`. Use a host-only cookie on `guest.eventpovcamera.app` (do not set `Domain=.eventpovcamera.app`). This is the **only** identity mechanism. It is sent automatically with every API request. JavaScript cannot read or modify it.
 - **localStorage:** Stores supplementary, non-authoritative data only — display name, event name (for fast UI rendering before API responds), local thumbnail cache references, upload queue state. All guest keys must be namespaced (for example, `guest:*`). All of this is derived data.
 - **Session validation:** On every app load, the client calls `GET /api/my-session`. If the server returns 401 (cookie missing or invalid), the client clears only guest-scoped localStorage keys (for example, `guest:*`) and redirects to the join flow.
 - **Cookie loss:** If a guest clears their browser data, they lose their session and appear as a new guest. This is acceptable for the short-lived nature of event usage.

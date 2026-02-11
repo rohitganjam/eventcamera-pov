@@ -32,6 +32,15 @@ function parsePositiveInt(input: string | undefined, fallback: number): number {
   return parsed;
 }
 
+function parseCsv(input: string | undefined): string[] {
+  if (!input) return [];
+
+  return input
+    .split(',')
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0);
+}
+
 function requireEnv(name: string): string {
   const value = process.env[name];
   if (!value) {
@@ -70,5 +79,6 @@ export const env = {
   signedUrlTtlSeconds: parsePositiveInt(
     process.env.SIGNED_URL_TTL_SECONDS,
     DEFAULT_SIGNED_URL_TTL_SECONDS
-  )
+  ),
+  corsAllowedOrigins: parseCsv(process.env.CORS_ALLOWED_ORIGINS)
 };

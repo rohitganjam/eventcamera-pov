@@ -1,6 +1,8 @@
 import { ApiClientError, createHttpClient, type HttpClientConfig } from '../core/http';
 import type { QueryParams } from '../core/http';
 import type {
+  BatchDownloadUrlsRequest,
+  BatchDownloadUrlsResponse,
   BulkHideRequest,
   BulkHideResponse,
   CapacityUpdateRequest,
@@ -62,6 +64,11 @@ export interface OrganizerApiClient {
     mediaId: UUID,
     options?: OrganizerRequestOptions
   ): Promise<DownloadUrlResponse>;
+  getMediaDownloadUrls(
+    eventId: UUID,
+    body: BatchDownloadUrlsRequest,
+    options?: OrganizerRequestOptions
+  ): Promise<BatchDownloadUrlsResponse>;
   downloadAll(
     eventId: UUID,
     body?: DownloadAllRequest,
@@ -227,6 +234,15 @@ export function createOrganizerApiClient(config: OrganizerClientConfig): Organiz
       return withAuth({
         method: 'GET',
         path: `/api/organizer/events/${encodePathSegment(eventId)}/media/${encodePathSegment(mediaId)}/download-url`,
+        request: options
+      });
+    },
+
+    getMediaDownloadUrls(eventId, body, options) {
+      return withAuth({
+        method: 'POST',
+        path: `/api/organizer/events/${encodePathSegment(eventId)}/media/download-urls`,
+        body,
         request: options
       });
     },

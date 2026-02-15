@@ -150,6 +150,21 @@ export interface DownloadUrlResponse {
   expires_at: string;
 }
 
+export interface BatchDownloadUrlsRequest {
+  media_ids: UUID[];
+}
+
+export interface BatchDownloadUrlItem {
+  media_id: UUID;
+  download_url: string;
+  file_name: string;
+}
+
+export interface BatchDownloadUrlsResponse {
+  items: BatchDownloadUrlItem[];
+  expires_at: string;
+}
+
 export interface DownloadAllRequest {
   exclude_hidden?: boolean;
 }

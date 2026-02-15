@@ -118,6 +118,13 @@ export const organizerGetMediaDownloadUrl = asyncHandler(async (req, res) => {
   res.status(200).json(payload);
 });
 
+export const organizerGetMediaDownloadUrls = asyncHandler(async (req, res) => {
+  const organizerId = getOrganizerId(req);
+  const mediaIds = Array.isArray(req.body?.media_ids) ? req.body.media_ids : [];
+  const payload = await organizerService.getMediaDownloadUrls(organizerId, req.params.id, mediaIds);
+  res.status(200).json(payload);
+});
+
 export const organizerDownloadAll = asyncHandler(async (req, res) => {
   const organizerId = getOrganizerId(req);
   const excludeHidden = req.body?.exclude_hidden !== false;

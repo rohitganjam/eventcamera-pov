@@ -14,6 +14,7 @@ import {
   organizerGetGallery,
   organizerGetGalleryStats,
   organizerGetGuests,
+  organizerGetMediaDownloadUrls,
   organizerGetJobStatus,
   organizerGetMediaDownloadUrl,
   organizerHideMedia,
@@ -36,6 +37,7 @@ organizerRouter.get('/events/:id/gallery/stats', organizerGetGalleryStats);
 organizerRouter.post('/events/:id/media/:mid/hide', organizerHideMedia);
 organizerRouter.post('/events/:id/media/:mid/unhide', organizerUnhideMedia);
 organizerRouter.post('/events/:id/media/bulk-hide', organizerBulkHideMedia);
+organizerRouter.post('/events/:id/media/download-urls', organizerGetMediaDownloadUrls);
 organizerRouter.get('/events/:id/media/:mid/download-url', organizerGetMediaDownloadUrl);
 organizerRouter.post('/events/:id/download-all', organizerDownloadAll);
 organizerRouter.post('/events/:id/download-selected', organizerDownloadSelected);

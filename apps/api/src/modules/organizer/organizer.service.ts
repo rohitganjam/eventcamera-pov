@@ -82,6 +82,13 @@ interface DbMediaGalleryRow {
   tags: string[] | null;
 }
 
+interface DbMediaDownloadRow {
+  media_id: string;
+  storage_path: string | null;
+  uploaded_at: Date | string | null;
+  uploader_name: string | null;
+}
+
 interface DbMediaStatsRow {
   uploaded_at: Date | string | null;
   size_bytes: number;
@@ -305,6 +312,39 @@ function parseLimit(value: number | undefined): number {
     throw new AppError(400, 'VALIDATION_ERROR', 'limit must be between 1 and 200');
   }
   return value;
+}
+
+function sanitizeFileNamePart(value: string | null | undefined, fallback: string): string {
+  const normalized = (value ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+
+  return normalized || fallback;
+}
+
+function extensionFromPath(storagePath: string): string {
+  const fileName = storagePath.split('/').pop() ?? '';
+  const dotIndex = fileName.lastIndexOf('.');
+  if (dotIndex <= 0 || dotIndex === fileName.length - 1) {
+    return 'jpg';
+  }
+
+  return fileName.slice(dotIndex + 1).toLowerCase();
+}
+
+function compactTimestamp(value: Date | string | null): string {
+  const iso = toIsoDateTime(value) ?? new Date().toISOString();
+  return iso.replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
+}
+
+function buildDownloadFileName(row: DbMediaDownloadRow): string {
+  const extension = row.storage_path ? extensionFromPath(row.storage_path) : 'jpg';
+  const uploaderPart = sanitizeFileNamePart(row.uploader_name, 'guest');
+  const timestampPart = compactTimestamp(row.uploaded_at);
+  const shortId = row.media_id.slice(0, 8);
+  return `${timestampPart}-${uploaderPart}-${shortId}.${extension}`;
 }
 
 function calculateTotalFeeMinor(
@@ -1072,6 +1112,77 @@ class OrganizerService {
     return {
       download_url: downloadUrl,
       expires_at: new Date(Date.now() + env.signedUrlTtlSeconds * 1000).toISOString()
+    };
+  }
+
+  async getMediaDownloadUrls(organizerId: string, eventId: string, mediaIds: string[]) {
+    ensureUuid(organizerId, 'organizer_id');
+    ensureUuid(eventId, 'event_id');
+
+    if (!Array.isArray(mediaIds) || mediaIds.length === 0) {
+      throw new AppError(400, 'INVALID_REQUEST', 'At least one media_id is required');
+    }
+
+    if (mediaIds.length > 100) {
+      throw new AppError(400, 'INVALID_REQUEST', 'Cannot request more than 100 media URLs at once');
+    }
+
+    for (const mediaId of mediaIds) {
+      ensureUuid(mediaId, 'media_id');
+    }
+
+    await queryOwnedEventBase(organizerId, eventId);
+
+    const result = await query<DbMediaDownloadRow>(
+      `
+        SELECT
+          m.id AS media_id,
+          m.storage_path,
+          COALESCE(m.uploaded_at, m.created_at) AS uploaded_at,
+          COALESCE(m.uploader_name, ds.display_name) AS uploader_name
+        FROM media m
+        LEFT JOIN device_sessions ds ON ds.id = m.device_session_id
+        WHERE m.event_id = $1::uuid
+          AND m.id = ANY($2::uuid[])
+          AND m.storage_path IS NOT NULL
+          AND m.status IN ('uploaded', 'hidden')
+          AND EXISTS (
+            SELECT 1
+            FROM event_organizers eo
+            WHERE eo.event_id = m.event_id
+              AND eo.organizer_id = $3::uuid
+          )
+      `,
+      [eventId, mediaIds, organizerId]
+    );
+
+    const mediaById = new Map(result.rows.map((row) => [row.media_id, row]));
+    const orderedRows = mediaIds
+      .map((mediaId) => mediaById.get(mediaId))
+      .filter((row): row is DbMediaDownloadRow => Boolean(row));
+
+    if (orderedRows.length === 0) {
+      throw new AppError(404, 'NOT_FOUND', 'No downloadable media found for this selection');
+    }
+
+    const expiresAt = new Date(Date.now() + env.signedUrlTtlSeconds * 1000).toISOString();
+    const items = await Promise.all(
+      orderedRows.map(async (row) => {
+        if (!row.storage_path) {
+          throw new AppError(404, 'NOT_FOUND', `Media ${row.media_id} has no storage path`);
+        }
+
+        return {
+          media_id: row.media_id,
+          download_url: await createSignedStorageObjectUrl(env.storageOriginalsBucket, row.storage_path),
+          file_name: buildDownloadFileName(row)
+        };
+      })
+    );
+
+    return {
+      items,
+      expires_at: expiresAt
     };
   }
 

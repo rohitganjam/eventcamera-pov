@@ -9,16 +9,20 @@ import {
   Calendar,
   Users,
   Lock,
-  ExternalLink,
   Archive,
   XCircle,
   Loader2,
-  Camera
+  Camera,
+  Copy,
+  Check,
+  QrCode,
+  Share2
 } from 'lucide-react';
 import { ApiClientError, type EventSummary } from '@poveventcam/api-client';
 
 import { organizerApi } from '../lib/organizer-api';
 import { useAuth } from './AuthProvider';
+import { OrganizerHeader } from './OrganizerHeader';
 
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -98,6 +102,10 @@ function formatAmountMinor(amount: number, currency: string): string {
   return `${currency} ${(amount / 100).toFixed(2)}`;
 }
 
+function buildQrImageUrl(url: string): string {
+  return `https://api.qrserver.com/v1/create-qr-code/?size=320x320&data=${encodeURIComponent(url)}`;
+}
+
 export function OrganizerShell() {
   const { session, signOut } = useAuth();
 
@@ -113,6 +121,17 @@ export function OrganizerShell() {
 
   const [actioningEventId, setActioningEventId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [shareModal, setShareModal] = useState<{
+    isOpen: boolean;
+    eventName: string;
+    guestUrl: string;
+    isCopied: boolean;
+  }>({
+    isOpen: false,
+    eventName: '',
+    guestUrl: '',
+    isCopied: false
+  });
 
   const sortedEvents = useMemo(
     () => [...events].sort((a, b) => b.created_at.localeCompare(a.created_at)),
@@ -251,25 +270,49 @@ export function OrganizerShell() {
     }
   }
 
+  async function copyTextToClipboard(value: string): Promise<void> {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(value);
+      return;
+    }
+
+    const textArea = document.createElement('textarea');
+    textArea.value = value;
+    textArea.style.position = 'fixed';
+    textArea.style.opacity = '0';
+    document.body.appendChild(textArea);
+    textArea.focus();
+    textArea.select();
+
+    const copied = document.execCommand('copy');
+    document.body.removeChild(textArea);
+
+    if (!copied) {
+      throw new Error('Clipboard copy failed');
+    }
+  }
+
+  async function handleCopyGuestLink(guestUrl: string): Promise<void> {
+    try {
+      await copyTextToClipboard(guestUrl);
+      setShareModal((current) => ({
+        ...current,
+        isCopied: true
+      }));
+    } catch (nextError) {
+      setActionError(extractErrorMessage(nextError));
+    }
+  }
+
   return (
     <main className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100">
-      {/* Header */}
-      <header className="border-b bg-white/80 backdrop-blur-sm">
-        <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-4">
-          <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10">
-              <Camera className="h-5 w-5 text-primary" />
-            </div>
-            <div>
-              <h1 className="text-lg font-semibold">Organizer Dashboard</h1>
-              <p className="text-sm text-muted-foreground">{session?.user.email}</p>
-            </div>
-          </div>
-          <Button variant="ghost" onClick={() => void signOut()}>
-            Sign Out
-          </Button>
-        </div>
-      </header>
+      <OrganizerHeader
+        title="Organizer Dashboard"
+        subtitle={session?.user.email}
+        userEmail={session?.user.email}
+        userName={session?.user.user_metadata?.name ?? session?.user.user_metadata?.full_name}
+        onSignOut={signOut}
+      />
 
       <div className="mx-auto max-w-6xl px-4 py-6 space-y-6">
         {/* Events Panel */}
@@ -340,59 +383,66 @@ export function OrganizerShell() {
                           <Image className="h-3.5 w-3.5" />
                           <span>{item.max_uploads_per_guest} img/guest</span>
                         </div>
-                        <div className="flex items-center gap-2 text-muted-foreground">
-                          <span className="text-xs">Slug:</span>
-                          <code className="rounded bg-muted px-1.5 py-0.5 text-xs">{item.slug}</code>
-                        </div>
                         <div className="text-xs text-muted-foreground">
                           {formatAmountMinor(item.total_fee, item.currency)} • {item.compression_mode}
                         </div>
-                        {item.guest_url && (
-                          <a
-                            href={item.guest_url}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="flex items-center gap-1 text-xs text-primary hover:underline"
-                          >
-                            <ExternalLink className="h-3 w-3" />
-                            Guest link
-                          </a>
-                        )}
                       </div>
 
-                      <div className="flex flex-wrap gap-2 pt-2">
-                        <Button size="sm" asChild>
+                      <div className="space-y-2 pt-2">
+                        <Button size="sm" className="w-full" asChild>
                           <Link href={`/events/${item.id}/gallery`}>
                             <Image className="h-4 w-4" />
                             Gallery
                           </Link>
                         </Button>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          onClick={() => void handleCloseEvent(item.id)}
-                          disabled={actioningEventId === item.id || item.status === 'archived'}
-                        >
-                          {actioningEventId === item.id ? (
-                            <Loader2 className="h-4 w-4 animate-spin" />
-                          ) : (
-                            <XCircle className="h-4 w-4" />
-                          )}
-                          Close
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          onClick={() => void handleArchiveEvent(item.id)}
-                          disabled={actioningEventId === item.id || item.status === 'archived'}
-                        >
-                          {actioningEventId === item.id ? (
-                            <Loader2 className="h-4 w-4 animate-spin" />
-                          ) : (
-                            <Archive className="h-4 w-4" />
-                          )}
-                          Archive
-                        </Button>
+                        {item.guest_url ? (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="w-full"
+                            onClick={() =>
+                              setShareModal({
+                                isOpen: true,
+                                eventName: item.name,
+                                guestUrl: item.guest_url!,
+                                isCopied: false
+                              })
+                            }
+                          >
+                            <Share2 className="h-4 w-4" />
+                            Share with guests
+                          </Button>
+                        ) : null}
+                        <div className="grid grid-cols-2 gap-2">
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="w-full"
+                            onClick={() => void handleCloseEvent(item.id)}
+                            disabled={actioningEventId === item.id || item.status === 'archived'}
+                          >
+                            {actioningEventId === item.id ? (
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                            ) : (
+                              <XCircle className="h-4 w-4" />
+                            )}
+                            Close
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="w-full"
+                            onClick={() => void handleArchiveEvent(item.id)}
+                            disabled={actioningEventId === item.id || item.status === 'archived'}
+                          >
+                            {actioningEventId === item.id ? (
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                            ) : (
+                              <Archive className="h-4 w-4" />
+                            )}
+                            Archive
+                          </Button>
+                        </div>
                       </div>
                     </CardContent>
                   </Card>
@@ -402,6 +452,45 @@ export function OrganizerShell() {
           </CardContent>
         </Card>
       </div>
+
+      <Dialog
+        open={shareModal.isOpen}
+        onOpenChange={(open: boolean) =>
+          setShareModal((current) => ({
+            ...current,
+            isOpen: open,
+            isCopied: open ? current.isCopied : false
+          }))
+        }
+      >
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Share with Guests</DialogTitle>
+            <DialogDescription>{shareModal.eventName}</DialogDescription>
+          </DialogHeader>
+          <div className="flex flex-col gap-3">
+            <div className="flex items-start gap-2">
+              <p className="min-w-0 flex-1 break-all rounded bg-muted px-3 py-2 text-xs text-foreground">
+                {shareModal.guestUrl}
+              </p>
+              <Button
+                size="icon"
+                variant="outline"
+                className="h-7 w-7 shrink-0"
+                onClick={() => void handleCopyGuestLink(shareModal.guestUrl)}
+                aria-label="Copy guest link"
+              >
+                {shareModal.isCopied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+              </Button>
+            </div>
+            <img
+              src={buildQrImageUrl(shareModal.guestUrl)}
+              alt="Guest link QR code"
+              className="mx-auto h-64 w-64 rounded border bg-white p-2"
+            />
+          </div>
+        </DialogContent>
+      </Dialog>
 
       {/* Create Event Modal */}
       <Dialog open={isCreateModalOpen} onOpenChange={setIsCreateModalOpen}>

@@ -1,10 +1,7 @@
 'use client';
 
-import Link from 'next/link';
-import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { FormEvent, MouseEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ArrowLeft,
-  Camera,
   Check,
   ChevronLeft,
   ChevronRight,
@@ -12,27 +9,38 @@ import {
   ExternalLink,
   Eye,
   Filter,
+  Image,
   Loader2,
   RefreshCw,
   Search,
-  X,
-  Image
+  X
 } from 'lucide-react';
 import { ApiClientError, type EventDetail, type GalleryItem } from '@poveventcam/api-client';
 
 import { organizerApi } from '../lib/organizer-api';
+import { createZipBlob } from '../lib/zip';
 import { useAuth } from './AuthProvider';
+import { OrganizerHeader } from './OrganizerHeader';
 
+import { Alert, AlertDescription } from '@/components/ui/alert';
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Input } from '@/components/ui/input';
-import { Badge } from '@/components/ui/badge';
-import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Checkbox } from '@/components/ui/checkbox';
+import { Input } from '@/components/ui/input';
 
 interface OrganizerGalleryShellProps {
   eventId: string;
 }
+
+interface DownloadProgressState {
+  completed: number;
+  total: number;
+}
+
+const PAGE_SIZE = 100;
+const INITIAL_PAGE_LOAD = 30;
+const DOWNLOAD_CONCURRENCY = 5;
 
 function extractErrorMessage(error: unknown): string {
   if (error instanceof ApiClientError) {
@@ -52,90 +60,148 @@ function bytesToHuman(sizeBytes: number): string {
   return `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
+function compactDateForFile(): string {
+  return new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
+}
+
+function sanitizeZipName(value: string): string {
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return normalized || 'event';
+}
+
+async function runWithConcurrency<T>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T, index: number) => Promise<void>
+): Promise<void> {
+  let cursor = 0;
+  const runnerCount = Math.min(Math.max(concurrency, 1), items.length);
+
+  await Promise.all(
+    Array.from({ length: runnerCount }, async () => {
+      for (; ;) {
+        const currentIndex = cursor;
+        cursor += 1;
+        if (currentIndex >= items.length) {
+          break;
+        }
+        await worker(items[currentIndex], currentIndex);
+      }
+    })
+  );
 }
 
 export function OrganizerGalleryShell({ eventId }: OrganizerGalleryShellProps) {
   const { session, signOut } = useAuth();
   const aliveRef = useRef(true);
+  const galleryRequestVersionRef = useRef(0);
 
   const [eventDetail, setEventDetail] = useState<EventDetail | null>(null);
   const [eventError, setEventError] = useState<string | null>(null);
 
   const [galleryItems, setGalleryItems] = useState<GalleryItem[]>([]);
-  const [galleryCursor, setGalleryCursor] = useState<string | null>(null);
   const [galleryTotalCount, setGalleryTotalCount] = useState(0);
+  const [galleryPage, setGalleryPage] = useState(0);
   const [isGalleryLoading, setIsGalleryLoading] = useState(false);
+  const [isPageEagerLoading, setIsPageEagerLoading] = useState(false);
   const [galleryError, setGalleryError] = useState<string | null>(null);
-  const [downloadingMediaId, setDownloadingMediaId] = useState<string | null>(null);
 
   const [filterUploaderInput, setFilterUploaderInput] = useState('');
   const [filterTagsInput, setFilterTagsInput] = useState('');
   const [activeFilterUploader, setActiveFilterUploader] = useState('');
   const [activeFilterTags, setActiveFilterTags] = useState('');
 
-  const [isBulkDownloading, setIsBulkDownloading] = useState(false);
-  const [bulkDownloadMessage, setBulkDownloadMessage] = useState<string | null>(null);
-  const [bulkDownloadError, setBulkDownloadError] = useState<string | null>(null);
-  const [bulkDownloadLinks, setBulkDownloadLinks] = useState<string[]>([]);
+  const [showUndownloadedOnly, setShowUndownloadedOnly] = useState(false);
+  const [downloadedMediaIds, setDownloadedMediaIds] = useState<Set<string>>(new Set());
 
-  // Selection state
   const [selectedMediaIds, setSelectedMediaIds] = useState<Set<string>>(new Set());
 
-  // Preview state
   const [previewIndex, setPreviewIndex] = useState<number | null>(null);
   const [isPreviewDownloading, setIsPreviewDownloading] = useState(false);
 
-  // Long press state for touch devices
+  const [isBatchDownloading, setIsBatchDownloading] = useState(false);
+  const [downloadProgress, setDownloadProgress] = useState<DownloadProgressState | null>(null);
+  const [downloadMessage, setDownloadMessage] = useState<string | null>(null);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
+
   const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const longPressTriggeredRef = useRef(false);
 
   const heading = useMemo(() => {
     if (!eventDetail) return 'Image Gallery';
-    return `${eventDetail.name} Gallery`;
+    return `${eventDetail.name}`;
   }, [eventDetail]);
 
+  const currentOffset = galleryPage * PAGE_SIZE;
+  const currentPageAvailableCount = useMemo(() => {
+    const remaining = galleryTotalCount - currentOffset;
+    if (remaining <= 0) return 0;
+    return Math.min(PAGE_SIZE, remaining);
+  }, [currentOffset, galleryTotalCount]);
+
+  const pageCount = useMemo(() => {
+    if (galleryTotalCount <= 0) return 1;
+    return Math.ceil(galleryTotalCount / PAGE_SIZE);
+  }, [galleryTotalCount]);
+
+  const visibleGalleryItems = useMemo(() => {
+    if (!showUndownloadedOnly) {
+      return galleryItems;
+    }
+    return galleryItems.filter((item) => !downloadedMediaIds.has(item.media_id));
+  }, [downloadedMediaIds, galleryItems, showUndownloadedOnly]);
+
   const previewItem = useMemo(() => {
-    if (previewIndex === null || previewIndex < 0 || previewIndex >= galleryItems.length) {
+    if (previewIndex === null || previewIndex < 0 || previewIndex >= visibleGalleryItems.length) {
       return null;
     }
-    return galleryItems[previewIndex];
-  }, [previewIndex, galleryItems]);
+    return visibleGalleryItems[previewIndex];
+  }, [previewIndex, visibleGalleryItems]);
 
+  const selectedVisibleCount = useMemo(() => {
+    return visibleGalleryItems.reduce(
+      (count, item) => (selectedMediaIds.has(item.media_id) ? count + 1 : count),
+      0
+    );
+  }, [selectedMediaIds, visibleGalleryItems]);
+
+  const allVisibleSelected =
+    visibleGalleryItems.length > 0 && selectedVisibleCount === visibleGalleryItems.length;
   const hasSelection = selectedMediaIds.size > 0;
+  const hasActiveFilters = Boolean(activeFilterUploader || activeFilterTags || showUndownloadedOnly);
 
   useEffect(() => {
+    aliveRef.current = true;
     return () => {
       aliveRef.current = false;
     };
   }, []);
 
-  // Keyboard navigation for preview
   useEffect(() => {
     if (previewIndex === null) return;
 
-    function handleKeyDown(e: KeyboardEvent) {
-      if (e.key === 'Escape') {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') {
         setPreviewIndex(null);
-      } else if (e.key === 'ArrowLeft') {
-        e.preventDefault();
+      } else if (event.key === 'ArrowLeft') {
+        event.preventDefault();
         setPreviewIndex((prev) => (prev !== null && prev > 0 ? prev - 1 : prev));
-      } else if (e.key === 'ArrowRight') {
-        e.preventDefault();
+      } else if (event.key === 'ArrowRight') {
+        event.preventDefault();
         setPreviewIndex((prev) =>
-          prev !== null && prev < galleryItems.length - 1 ? prev + 1 : prev
+          prev !== null && prev < visibleGalleryItems.length - 1 ? prev + 1 : prev
         );
       }
     }
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [previewIndex, galleryItems.length]);
+  }, [previewIndex, visibleGalleryItems.length]);
 
-  // Disable body scroll when preview is open
   useEffect(() => {
     if (previewIndex !== null) {
       document.body.style.overflow = 'hidden';
@@ -147,136 +213,155 @@ export function OrganizerGalleryShell({ eventId }: OrganizerGalleryShellProps) {
     };
   }, [previewIndex]);
 
-  async function loadEvent() {
+  const loadEvent = useCallback(async () => {
     setEventError(null);
     try {
       const payload = await organizerApi.getEvent(eventId);
+      if (!aliveRef.current) return;
       setEventDetail(payload.event);
     } catch (nextError) {
+      if (!aliveRef.current) return;
       setEventError(extractErrorMessage(nextError));
     }
-  }
+  }, [eventId]);
 
-  async function loadGallery(reset: boolean): Promise<void> {
-    setIsGalleryLoading(true);
+  const loadGalleryPage = useCallback(
+    async (pageIndex: number) => {
+      const requestVersion = galleryRequestVersionRef.current + 1;
+      galleryRequestVersionRef.current = requestVersion;
+      setIsGalleryLoading(true);
+      setGalleryError(null);
+      setDownloadError(null);
+      setDownloadMessage(null);
+
+      try {
+        const offset = pageIndex * PAGE_SIZE;
+        const response = await organizerApi.getGallery(eventId, {
+          cursor: String(offset),
+          limit: INITIAL_PAGE_LOAD,
+          sort: 'newest',
+          filter_uploader: activeFilterUploader || undefined,
+          filter_tag: activeFilterTags || undefined
+        });
+
+        if (!aliveRef.current || requestVersion !== galleryRequestVersionRef.current) {
+          return;
+        }
+
+        const maxPage = response.total_count > 0 ? Math.ceil(response.total_count / PAGE_SIZE) - 1 : 0;
+        if (pageIndex > maxPage) {
+          setGalleryPage(maxPage);
+          return;
+        }
+
+        setGalleryItems(response.media);
+        setGalleryTotalCount(response.total_count);
+        setSelectedMediaIds(new Set());
+        setPreviewIndex(null);
+      } catch (nextError) {
+        if (!aliveRef.current || requestVersion !== galleryRequestVersionRef.current) {
+          return;
+        }
+        setGalleryError(extractErrorMessage(nextError));
+      } finally {
+        if (requestVersion === galleryRequestVersionRef.current) {
+          setIsGalleryLoading(false);
+          setIsPageEagerLoading(false);
+        }
+      }
+    },
+    [activeFilterTags, activeFilterUploader, eventId]
+  );
+
+  const loadRemainingForCurrentPage = useCallback(async (): Promise<GalleryItem[]> => {
+    if (isPageEagerLoading || isGalleryLoading) {
+      return galleryItems;
+    }
+
+    const currentRequestVersion = galleryRequestVersionRef.current;
+    const offset = galleryPage * PAGE_SIZE;
+    const targetCount = Math.min(PAGE_SIZE, Math.max(0, galleryTotalCount - offset));
+    if (targetCount <= 0 || galleryItems.length >= targetCount) {
+      return galleryItems;
+    }
+
+    setIsPageEagerLoading(true);
     setGalleryError(null);
 
     try {
       const response = await organizerApi.getGallery(eventId, {
-        cursor: reset ? undefined : galleryCursor ?? undefined,
-        limit: 30,
+        cursor: String(offset + galleryItems.length),
+        limit: targetCount - galleryItems.length,
         sort: 'newest',
         filter_uploader: activeFilterUploader || undefined,
         filter_tag: activeFilterTags || undefined
       });
 
-      setGalleryItems((current) => (reset ? response.media : [...current, ...response.media]));
-      setGalleryCursor(response.next_cursor ?? null);
-      setGalleryTotalCount(response.total_count);
-
-      // Clear selection on filter change
-      if (reset) {
-        setSelectedMediaIds(new Set());
+      if (!aliveRef.current || currentRequestVersion !== galleryRequestVersionRef.current) {
+        return galleryItems;
       }
+
+      const existingIds = new Set(galleryItems.map((item) => item.media_id));
+      const merged = [
+        ...galleryItems,
+        ...response.media.filter((item) => !existingIds.has(item.media_id))
+      ];
+
+      setGalleryItems(merged);
+      setGalleryTotalCount(response.total_count);
+      return merged;
     } catch (nextError) {
-      setGalleryError(extractErrorMessage(nextError));
+      if (aliveRef.current && currentRequestVersion === galleryRequestVersionRef.current) {
+        setGalleryError(extractErrorMessage(nextError));
+      }
+      return galleryItems;
     } finally {
-      setIsGalleryLoading(false);
+      if (currentRequestVersion === galleryRequestVersionRef.current) {
+        setIsPageEagerLoading(false);
+      }
     }
-  }
+  }, [
+    activeFilterTags,
+    activeFilterUploader,
+    eventId,
+    galleryItems,
+    galleryPage,
+    galleryTotalCount,
+    isGalleryLoading,
+    isPageEagerLoading
+  ]);
 
   useEffect(() => {
     void loadEvent();
-  }, [eventId]);
+  }, [loadEvent]);
 
   useEffect(() => {
-    void loadGallery(true);
-  }, [eventId, activeFilterUploader, activeFilterTags]);
+    void loadGalleryPage(galleryPage);
+  }, [galleryPage, loadGalleryPage]);
 
-  async function handleDownloadMedia(mediaId: string, isPreview = false) {
-    if (isPreview) {
-      setIsPreviewDownloading(true);
-    } else {
-      setDownloadingMediaId(mediaId);
-    }
-    setGalleryError(null);
+  useEffect(() => {
+    if (isGalleryLoading || isPageEagerLoading) return;
+    if (galleryItems.length === 0) return;
+    if (galleryItems.length >= currentPageAvailableCount) return;
 
-    try {
-      const payload = await organizerApi.getMediaDownloadUrl(eventId, mediaId);
-      window.open(payload.download_url, '_blank', 'noopener,noreferrer');
-    } catch (nextError) {
-      setGalleryError(extractErrorMessage(nextError));
-    } finally {
-      if (isPreview) {
-        setIsPreviewDownloading(false);
-      } else {
-        setDownloadingMediaId(null);
+    function maybeEagerLoad() {
+      const nearBottom =
+        window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 600;
+      if (nearBottom) {
+        void loadRemainingForCurrentPage();
       }
     }
-  }
 
-  async function pollBulkDownloadJob(jobId: string): Promise<void> {
-    for (let attempt = 0; attempt < 60; attempt += 1) {
-      if (!aliveRef.current) return;
-      await sleep(1500);
-
-      const status = await organizerApi.getJobStatus(jobId);
-      if (status.status === 'complete') {
-        const links: string[] = [];
-        if (status.download_url) links.push(status.download_url);
-        if (status.download_urls?.length) links.push(...status.download_urls);
-        setBulkDownloadLinks(links);
-        setBulkDownloadMessage('Bulk archive is ready.');
-        return;
-      }
-
-      if (status.status === 'failed') {
-        throw new Error(status.error_message || 'Bulk download job failed');
-      }
-
-      setBulkDownloadMessage(`Preparing archive... (${status.status})`);
-    }
-
-    throw new Error('Bulk download timed out. Try again.');
-  }
-
-  async function handleBulkDownload() {
-    setIsBulkDownloading(true);
-    setBulkDownloadError(null);
-    setBulkDownloadLinks([]);
-    setBulkDownloadMessage('Queueing archive...');
-
-    try {
-      const created = await organizerApi.downloadAll(eventId, { exclude_hidden: true });
-      await pollBulkDownloadJob(created.job_id);
-    } catch (nextError) {
-      setBulkDownloadError(extractErrorMessage(nextError));
-      setBulkDownloadMessage(null);
-    } finally {
-      setIsBulkDownloading(false);
-    }
-  }
-
-  async function handleDownloadSelected() {
-    if (selectedMediaIds.size === 0) return;
-
-    setIsBulkDownloading(true);
-    setBulkDownloadError(null);
-    setBulkDownloadLinks([]);
-    setBulkDownloadMessage(`Queueing archive for ${selectedMediaIds.size} selected image(s)...`);
-
-    try {
-      const created = await organizerApi.downloadSelected(eventId, {
-        media_ids: Array.from(selectedMediaIds)
-      });
-      await pollBulkDownloadJob(created.job_id);
-    } catch (nextError) {
-      setBulkDownloadError(extractErrorMessage(nextError));
-      setBulkDownloadMessage(null);
-    } finally {
-      setIsBulkDownloading(false);
-    }
-  }
+    window.addEventListener('scroll', maybeEagerLoad, { passive: true });
+    maybeEagerLoad();
+    return () => window.removeEventListener('scroll', maybeEagerLoad);
+  }, [
+    currentPageAvailableCount,
+    galleryItems.length,
+    isGalleryLoading,
+    isPageEagerLoading,
+    loadRemainingForCurrentPage
+  ]);
 
   function handleApplyFilters(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -288,6 +373,7 @@ export function OrganizerGalleryShell({ eventId }: OrganizerGalleryShellProps) {
         .filter(Boolean)
         .join(',')
     );
+    setGalleryPage(0);
   }
 
   function handleResetFilters() {
@@ -295,11 +381,13 @@ export function OrganizerGalleryShell({ eventId }: OrganizerGalleryShellProps) {
     setFilterTagsInput('');
     setActiveFilterUploader('');
     setActiveFilterTags('');
+    setShowUndownloadedOnly(false);
+    setGalleryPage(0);
   }
 
   function toggleSelectMedia(mediaId: string) {
-    setSelectedMediaIds((prev) => {
-      const next = new Set(prev);
+    setSelectedMediaIds((previous) => {
+      const next = new Set(previous);
       if (next.has(mediaId)) {
         next.delete(mediaId);
       } else {
@@ -309,25 +397,163 @@ export function OrganizerGalleryShell({ eventId }: OrganizerGalleryShellProps) {
     });
   }
 
-  function toggleSelectAll() {
-    if (selectedMediaIds.size === galleryItems.length) {
+  async function toggleSelectAllCurrentPage() {
+    if (allVisibleSelected) {
       setSelectedMediaIds(new Set());
-    } else {
-      setSelectedMediaIds(new Set(galleryItems.map((item) => item.media_id)));
+      return;
     }
+
+    const loadedItems =
+      galleryItems.length < currentPageAvailableCount
+        ? await loadRemainingForCurrentPage()
+        : galleryItems;
+
+    const selectableItems = showUndownloadedOnly
+      ? loadedItems.filter((item) => !downloadedMediaIds.has(item.media_id))
+      : loadedItems;
+    setSelectedMediaIds(new Set(selectableItems.map((item) => item.media_id)));
   }
 
   function clearSelection() {
     setSelectedMediaIds(new Set());
   }
 
-  // Long press handlers for touch devices
+  async function handleDownloadMedia(mediaId: string, isPreview = false) {
+    if (isPreview) {
+      setIsPreviewDownloading(true);
+    }
+    setGalleryError(null);
+
+    try {
+      const payload = await organizerApi.getMediaDownloadUrl(eventId, mediaId);
+      window.open(payload.download_url, '_blank', 'noopener,noreferrer');
+      setDownloadedMediaIds((previous) => {
+        const next = new Set(previous);
+        next.add(mediaId);
+        return next;
+      });
+    } catch (nextError) {
+      setGalleryError(extractErrorMessage(nextError));
+    } finally {
+      if (isPreview) {
+        setIsPreviewDownloading(false);
+      }
+    }
+  }
+
+  async function handleDownloadSelected() {
+    if (!selectedMediaIds.size) return;
+    if (selectedMediaIds.size > PAGE_SIZE) {
+      setDownloadError(`You can only download up to ${PAGE_SIZE} images at once.`);
+      return;
+    }
+
+    setIsBatchDownloading(true);
+    setDownloadError(null);
+    setDownloadMessage(null);
+    setDownloadProgress({
+      completed: 0,
+      total: selectedMediaIds.size
+    });
+
+    const selectedIds = Array.from(selectedMediaIds);
+    const zipEntries: Array<{ fileName: string; data: Uint8Array }> = [];
+    const successfulIds: string[] = [];
+    const failedIds: string[] = [];
+
+    try {
+      const payload = await organizerApi.getMediaDownloadUrls(eventId, {
+        media_ids: selectedIds
+      });
+
+      setDownloadProgress({
+        completed: 0,
+        total: payload.items.length
+      });
+
+      await runWithConcurrency(payload.items, DOWNLOAD_CONCURRENCY, async (item) => {
+        try {
+          const response = await fetch(item.download_url);
+          if (!response.ok) {
+            throw new Error(`Failed (${response.status})`);
+          }
+
+          const blob = await response.blob();
+          const data = new Uint8Array(await blob.arrayBuffer());
+          zipEntries.push({
+            fileName: item.file_name,
+            data
+          });
+          successfulIds.push(item.media_id);
+        } catch (_error) {
+          failedIds.push(item.media_id);
+        } finally {
+          setDownloadProgress((current) => {
+            if (!current) return current;
+            return {
+              total: current.total,
+              completed: Math.min(current.completed + 1, current.total)
+            };
+          });
+        }
+      });
+
+      if (!successfulIds.length) {
+        throw new Error('No files were downloaded. Please retry.');
+      }
+
+      setDownloadMessage('Packaging zip file...');
+      const zipBlob = createZipBlob(zipEntries);
+
+      const link = document.createElement('a');
+      const downloadUrl = URL.createObjectURL(zipBlob);
+      const eventSlug = sanitizeZipName(eventDetail?.slug ?? eventId);
+      link.href = downloadUrl;
+      link.download = `${eventSlug}-page-${galleryPage + 1}-${compactDateForFile()}.zip`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(downloadUrl);
+
+      setDownloadedMediaIds((previous) => {
+        const next = new Set(previous);
+        for (const mediaId of successfulIds) {
+          next.add(mediaId);
+        }
+        return next;
+      });
+      setSelectedMediaIds(new Set());
+
+      if (failedIds.length > 0) {
+        setDownloadMessage(`Downloaded ${successfulIds.length}/${payload.items.length}. ${failedIds.length} failed.`);
+      } else {
+        setDownloadMessage(`Downloaded ${successfulIds.length} image(s).`);
+      }
+    } catch (nextError) {
+      setDownloadError(extractErrorMessage(nextError));
+    } finally {
+      setIsBatchDownloading(false);
+      setDownloadProgress(null);
+    }
+  }
+
+  function goToPreviousPage() {
+    if (galleryPage <= 0) return;
+    setGalleryPage((current) => Math.max(0, current - 1));
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  function goToNextPage() {
+    if (galleryPage >= pageCount - 1) return;
+    setGalleryPage((current) => Math.min(pageCount - 1, current + 1));
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
   function handleTouchStart(mediaId: string) {
     longPressTriggeredRef.current = false;
     longPressTimerRef.current = setTimeout(() => {
       longPressTriggeredRef.current = true;
       toggleSelectMedia(mediaId);
-      // Provide haptic feedback if available
       if (navigator.vibrate) {
         navigator.vibrate(50);
       }
@@ -342,7 +568,6 @@ export function OrganizerGalleryShell({ eventId }: OrganizerGalleryShellProps) {
   }
 
   function handleTouchMove() {
-    // Cancel long press if user moves finger
     if (longPressTimerRef.current) {
       clearTimeout(longPressTimerRef.current);
       longPressTimerRef.current = null;
@@ -350,12 +575,11 @@ export function OrganizerGalleryShell({ eventId }: OrganizerGalleryShellProps) {
   }
 
   function handleImageClick(index: number, mediaId: string) {
-    // Don't open preview if long press was just triggered
     if (longPressTriggeredRef.current) {
       longPressTriggeredRef.current = false;
       return;
     }
-    // In selection mode, clicking toggles selection instead of opening preview
+
     if (hasSelection) {
       toggleSelectMedia(mediaId);
       return;
@@ -363,52 +587,35 @@ export function OrganizerGalleryShell({ eventId }: OrganizerGalleryShellProps) {
     setPreviewIndex(index);
   }
 
-  function handlePreviewClick(e: React.MouseEvent, index: number) {
-    e.stopPropagation();
+  function handlePreviewClick(event: MouseEvent, index: number) {
+    event.stopPropagation();
     setPreviewIndex(index);
   }
 
-  const hasActiveFilters = activeFilterUploader || activeFilterTags;
+  function handleUndownloadedToggle(checked: boolean | 'indeterminate') {
+    setShowUndownloadedOnly(Boolean(checked));
+    setSelectedMediaIds(new Set());
+    setPreviewIndex(null);
+  }
 
   return (
     <main className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100">
-      {/* Header */}
-      <header className="border-b bg-white/80 backdrop-blur-sm">
-        <div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-4">
-          <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10">
-              <Camera className="h-5 w-5 text-primary" />
-            </div>
-            <div>
-              <h1 className="text-lg font-semibold">{heading}</h1>
-              <p className="text-sm text-muted-foreground">
-                {session?.user.email}
-                {eventDetail ? ` • ${eventDetail.slug}` : ''}
-              </p>
-            </div>
-          </div>
-          <div className="flex items-center gap-2">
-            <Button variant="outline" asChild>
-              <Link href="/">
-                <ArrowLeft className="h-4 w-4" />
-                Dashboard
-              </Link>
-            </Button>
-            <Button variant="ghost" onClick={() => void signOut()}>
-              Sign Out
-            </Button>
-          </div>
-        </div>
-      </header>
+      <OrganizerHeader
+        title={heading}
+        backHref="/"
+        backLabel="Dashboard"
+        userEmail={session?.user.email}
+        userName={session?.user.user_metadata?.name ?? session?.user.user_metadata?.full_name}
+        onSignOut={signOut}
+      />
 
-      <div className="mx-auto max-w-7xl px-4 py-6 space-y-6">
+      <div className="mx-auto max-w-7xl space-y-6 px-4 py-6">
         {eventError && (
           <Alert variant="destructive">
             <AlertDescription>{eventError}</AlertDescription>
           </Alert>
         )}
 
-        {/* Filters & Toolbar */}
         <Card>
           <CardHeader className="pb-4">
             <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
@@ -417,17 +624,15 @@ export function OrganizerGalleryShell({ eventId }: OrganizerGalleryShellProps) {
                   <Image className="h-5 w-5" />
                   Gallery
                 </CardTitle>
-                <CardDescription>{galleryTotalCount} image(s)</CardDescription>
+                <CardDescription>
+                  {galleryTotalCount} image(s) • Page {galleryPage + 1} of {pageCount}
+                </CardDescription>
               </div>
               <div className="flex flex-wrap gap-2">
                 {hasSelection && (
                   <>
-                    <Button
-                      variant="secondary"
-                      onClick={() => void handleDownloadSelected()}
-                      disabled={isBulkDownloading}
-                    >
-                      {isBulkDownloading ? (
+                    <Button onClick={() => void handleDownloadSelected()} disabled={isBatchDownloading}>
+                      {isBatchDownloading ? (
                         <Loader2 className="h-4 w-4 animate-spin" />
                       ) : (
                         <Download className="h-4 w-4" />
@@ -440,35 +645,17 @@ export function OrganizerGalleryShell({ eventId }: OrganizerGalleryShellProps) {
                     </Button>
                   </>
                 )}
-                <Button
-                  onClick={() => void handleBulkDownload()}
-                  disabled={isBulkDownloading}
-                  variant={hasSelection ? 'outline' : 'default'}
-                >
-                  {isBulkDownloading ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  ) : (
-                    <Download className="h-4 w-4" />
-                  )}
-                  {isBulkDownloading ? 'Preparing...' : 'Download All'}
-                </Button>
-                <Button
-                  variant="outline"
-                  onClick={() => void loadGallery(true)}
-                  disabled={isGalleryLoading}
-                >
+                <Button variant="outline" onClick={() => void loadGalleryPage(galleryPage)} disabled={isGalleryLoading}>
                   <RefreshCw className={`h-4 w-4 ${isGalleryLoading ? 'animate-spin' : ''}`} />
-
                 </Button>
               </div>
             </div>
           </CardHeader>
 
           <CardContent className="space-y-4">
-            {/* Filters */}
             <form onSubmit={handleApplyFilters} className="flex flex-wrap items-end gap-3">
-              <div className="flex-1 min-w-[200px]">
-                <label className="text-sm font-medium text-muted-foreground mb-1.5 block">
+              <div className="min-w-[200px] flex-1">
+                <label className="mb-1.5 block text-sm font-medium text-muted-foreground">
                   Filter by uploader
                 </label>
                 <div className="relative">
@@ -482,8 +669,8 @@ export function OrganizerGalleryShell({ eventId }: OrganizerGalleryShellProps) {
                   />
                 </div>
               </div>
-              <div className="flex-1 min-w-[200px]">
-                <label className="text-sm font-medium text-muted-foreground mb-1.5 block">
+              <div className="min-w-[200px] flex-1">
+                <label className="mb-1.5 block text-sm font-medium text-muted-foreground">
                   Filter by tags
                 </label>
                 <Input
@@ -507,55 +694,56 @@ export function OrganizerGalleryShell({ eventId }: OrganizerGalleryShellProps) {
               </div>
             </form>
 
-            {/* Active filters & Select All */}
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <div className="flex flex-wrap gap-2">
-                {activeFilterUploader && (
-                  <Badge variant="secondary">
-                    Uploader: {activeFilterUploader}
-                  </Badge>
-                )}
-                {activeFilterTags && (
-                  <Badge variant="secondary">
-                    Tags: {activeFilterTags}
-                  </Badge>
-                )}
+              <div className="flex flex-wrap items-center gap-2">
+                {activeFilterUploader && <Badge variant="secondary">Uploader: {activeFilterUploader}</Badge>}
+                {activeFilterTags && <Badge variant="secondary">Tags: {activeFilterTags}</Badge>}
+                {showUndownloadedOnly && <Badge variant="secondary">Not Yet Downloaded</Badge>}
+                <label className="ml-2 inline-flex items-center gap-2 text-sm text-muted-foreground">
+                  <Checkbox checked={showUndownloadedOnly} onCheckedChange={handleUndownloadedToggle} />
+                  Show not yet downloaded
+                </label>
               </div>
-              {galleryItems.length > 0 && (
-                <Button variant="ghost" size="sm" onClick={toggleSelectAll}>
+              {visibleGalleryItems.length > 0 && (
+                <Button variant="ghost" size="sm" onClick={() => void toggleSelectAllCurrentPage()}>
                   <Check className="h-4 w-4" />
-                  {selectedMediaIds.size === galleryItems.length ? 'Deselect All' : 'Select All'}
+                  {allVisibleSelected ? 'Deselect All' : 'Select All'}
                 </Button>
               )}
             </div>
 
-            {/* Bulk download status */}
-            {bulkDownloadMessage && (
-              <Alert variant="info">
-                <AlertDescription>{bulkDownloadMessage}</AlertDescription>
-              </Alert>
-            )}
-            {bulkDownloadError && (
-              <Alert variant="destructive">
-                <AlertDescription>{bulkDownloadError}</AlertDescription>
-              </Alert>
-            )}
-            {bulkDownloadLinks.length > 0 && (
-              <div className="flex flex-wrap gap-2">
-                {bulkDownloadLinks.map((link, index) => (
-                  <Button key={link} variant="outline" size="sm" asChild>
-                    <a href={link} target="_blank" rel="noreferrer">
-                      <Download className="h-4 w-4" />
-                      Download Archive {bulkDownloadLinks.length > 1 ? index + 1 : ''}
-                    </a>
-                  </Button>
-                ))}
+            {downloadProgress && (
+              <div className="space-y-2">
+                <p className="text-sm text-muted-foreground">
+                  Downloading {downloadProgress.completed}/{downloadProgress.total}...
+                </p>
+                <div className="h-2 w-full rounded-full bg-muted">
+                  <div
+                    className="h-2 rounded-full bg-primary transition-all"
+                    style={{
+                      width: `${Math.max(
+                        4,
+                        Math.round((downloadProgress.completed / Math.max(downloadProgress.total, 1)) * 100)
+                      )}%`
+                    }}
+                  />
+                </div>
               </div>
+            )}
+
+            {downloadMessage && (
+              <Alert variant="info">
+                <AlertDescription>{downloadMessage}</AlertDescription>
+              </Alert>
+            )}
+            {downloadError && (
+              <Alert variant="destructive">
+                <AlertDescription>{downloadError}</AlertDescription>
+              </Alert>
             )}
           </CardContent>
         </Card>
 
-        {/* Gallery Grid */}
         {galleryError && (
           <Alert variant="destructive">
             <AlertDescription>{galleryError}</AlertDescription>
@@ -566,28 +754,36 @@ export function OrganizerGalleryShell({ eventId }: OrganizerGalleryShellProps) {
           <div className="flex items-center justify-center py-12">
             <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
           </div>
-        ) : galleryItems.length === 0 ? (
+        ) : visibleGalleryItems.length === 0 ? (
           <Card>
             <CardContent className="py-12 text-center">
               <Image className="mx-auto h-12 w-12 text-muted-foreground/50" />
-              <p className="mt-4 text-muted-foreground">
-                No images found {hasActiveFilters ? 'for this filter' : 'yet'}.
-              </p>
+              {showUndownloadedOnly && galleryItems.length > 0 ? (
+                <p className="mt-4 text-muted-foreground">
+                  All images on this page are currently marked as downloaded.
+                </p>
+              ) : (
+                <p className="mt-4 text-muted-foreground">
+                  No images found {hasActiveFilters ? 'for this filter' : 'yet'}.
+                </p>
+              )}
             </CardContent>
           </Card>
         ) : (
           <>
             <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
-              {galleryItems.map((item, index) => {
+              {visibleGalleryItems.map((item, index) => {
                 const isSelected = selectedMediaIds.has(item.media_id);
+                const isDownloaded = downloadedMediaIds.has(item.media_id);
+                const tags = item.tags ?? [];
                 return (
                   <Card
                     key={item.media_id}
-                    className={`overflow-hidden group cursor-pointer transition-all ${isSelected ? 'ring-2 ring-primary ring-offset-2' : ''
+                    className={`group cursor-pointer overflow-hidden transition-all ${isSelected ? 'ring-2 ring-primary ring-offset-2' : ''
                       }`}
                   >
                     <div
-                      className="relative aspect-square bg-muted select-none"
+                      className="relative aspect-square select-none bg-muted"
                       onClick={() => handleImageClick(index, item.media_id)}
                       onTouchStart={() => handleTouchStart(item.media_id)}
                       onTouchEnd={handleTouchEnd}
@@ -600,97 +796,102 @@ export function OrganizerGalleryShell({ eventId }: OrganizerGalleryShellProps) {
                         loading="lazy"
                         draggable={false}
                         className="h-full w-full object-cover transition-transform group-hover:scale-105"
+                        onError={(event) => {
+                          const image = event.currentTarget;
+                          if (image.dataset.originalFallbackApplied === 'true') {
+                            return;
+                          }
+                          image.dataset.originalFallbackApplied = 'true';
+                          image.src = item.original_url;
+                        }}
                       />
-                      {/* Selection mode overlay */}
-                      {hasSelection && (
-                        <div className="absolute inset-0 bg-black/20 pointer-events-none" />
-                      )}
-                      {/* Selection checkbox - top left */}
-                      <div
-                        className={`absolute top-2 left-2 transition-opacity ${isSelected || hasSelection ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
-                          }`}
-                        onClick={(e) => e.stopPropagation()}
-                        onTouchStart={(e) => e.stopPropagation()}
-                      >
+                      {hasSelection && <div className="pointer-events-none absolute inset-0 bg-black/20" />}
 
+                      <div
+                        className={`absolute left-2 top-2 transition-opacity ${isSelected || hasSelection ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
+                          }`}
+                        onClick={(event) => event.stopPropagation()}
+                        onTouchStart={(event) => event.stopPropagation()}
+                      >
                         <Checkbox
                           checked={isSelected}
                           onCheckedChange={() => toggleSelectMedia(item.media_id)}
-                          className={`h-5 w-5 shadow-md data-[state=checked]:bg-primary data-[state=checked]:border-primary ${hasSelection
-                            ? 'bg-white border-2 border-gray-500'
-                            : 'bg-white/90 border-2 border-gray-400'
+                          className={`h-5 w-5 shadow-md data-[state=checked]:border-primary data-[state=checked]:bg-primary ${hasSelection ? 'border-2 border-gray-500 bg-white' : 'border-2 border-gray-400 bg-white/90'
                             }`}
                         />
                       </div>
-                      {/* Preview button - top right, shows on hover */}
+
                       <button
-                        className="absolute top-2 right-2 p-1.5 rounded-full bg-black/50 text-white opacity-0 group-hover:opacity-100 transition-opacity hover:bg-black/70 active:bg-black/80"
-                        onClick={(e) => handlePreviewClick(e, index)}
-                        onTouchStart={(e) => e.stopPropagation()}
+                        className="absolute right-2 top-2 rounded-full bg-black/50 p-1.5 text-white opacity-0 transition-opacity hover:bg-black/70 active:bg-black/80 group-hover:opacity-100"
+                        onClick={(event) => handlePreviewClick(event, index)}
+                        onTouchStart={(event) => event.stopPropagation()}
                       >
                         <Eye className="h-4 w-4" />
                       </button>
                     </div>
                     <CardContent className="p-3">
-                      <p className="font-medium text-sm truncate">
-                        {item.uploaded_by || 'Unknown'}
-                      </p>
-                      <p className="text-xs text-muted-foreground truncate">
+                      <p className="truncate text-sm font-medium">{item.uploaded_by || 'Unknown'}</p>
+                      <p className="truncate text-xs text-muted-foreground">
                         {new Date(item.uploaded_at).toLocaleDateString()}
                       </p>
-                      <p className="text-xs text-muted-foreground truncate">
-                        {bytesToHuman(item.size_bytes)}
-                      </p>
-                      {item.tags && item.tags.length > 0 && (
-                        <div className="mt-2 flex flex-wrap gap-1">
-                          {item.tags.slice(0, 3).map((tag) => (
-                            <Badge key={tag} variant="secondary" className="text-xs py-0">
-                              {tag}
-                            </Badge>
-                          ))}
-                          {item.tags.length > 3 && (
-                            <Badge variant="outline" className="text-xs py-0">
-                              +{item.tags.length - 3}
-                            </Badge>
-                          )}
-                        </div>
-                      )}
+                      <p className="truncate text-xs text-muted-foreground">{bytesToHuman(item.size_bytes)}</p>
+                      <div className="mt-2 flex flex-wrap gap-1">
+                        {isDownloaded && (
+                          <Badge variant="success" className="text-xs py-0">
+                            Downloaded
+                          </Badge>
+                        )}
+                        {tags.slice(0, 2).map((tag) => (
+                          <Badge key={tag} variant="secondary" className="text-xs py-0">
+                            {tag}
+                          </Badge>
+                        ))}
+                        {tags.length > 2 && (
+                          <Badge variant="outline" className="text-xs py-0">
+                            +{tags.length - 2}
+                          </Badge>
+                        )}
+                      </div>
                     </CardContent>
                   </Card>
                 );
               })}
             </div>
 
-            {galleryCursor && (
-              <div className="flex justify-center pt-4">
+            <div className="flex flex-col items-center justify-between gap-3 pt-4 sm:flex-row">
+              <div className="text-sm text-muted-foreground">
+                Loaded {galleryItems.length}/{currentPageAvailableCount || 0} on this page
+                {isPageEagerLoading ? ' • Loading more...' : ''}
+              </div>
+              <div className="flex items-center gap-2">
+                <Button variant="outline" onClick={goToPreviousPage} disabled={galleryPage === 0 || isGalleryLoading}>
+                  <ChevronLeft className="h-4 w-4" />
+                  Prev
+                </Button>
+                <div className="text-sm text-muted-foreground">
+                  Page {galleryPage + 1} of {pageCount}
+                </div>
                 <Button
                   variant="outline"
-                  onClick={() => void loadGallery(false)}
-                  disabled={isGalleryLoading}
+                  onClick={goToNextPage}
+                  disabled={galleryPage >= pageCount - 1 || isGalleryLoading}
                 >
-                  {isGalleryLoading ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  ) : null}
-                  {isGalleryLoading ? 'Loading...' : 'Load More'}
+                  Next
+                  <ChevronRight className="h-4 w-4" />
                 </Button>
               </div>
-            )}
+            </div>
           </>
         )}
       </div>
 
-      {/* Image Preview Overlay */}
       {previewItem && previewIndex !== null && (
-        <div
-          className="fixed inset-0 z-50 bg-black/90 flex items-center justify-center"
-          onClick={() => setPreviewIndex(null)}
-        >
-          {/* Previous button */}
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/90" onClick={() => setPreviewIndex(null)}>
           {previewIndex > 0 && (
             <button
-              className="absolute left-4 top-1/2 -translate-y-1/2 text-white/80 hover:text-white p-3 rounded-full hover:bg-white/10 transition-colors"
-              onClick={(e) => {
-                e.stopPropagation();
+              className="absolute left-4 top-1/2 -translate-y-1/2 rounded-full p-3 text-white/80 transition-colors hover:bg-white/10 hover:text-white"
+              onClick={(event) => {
+                event.stopPropagation();
                 setPreviewIndex(previewIndex - 1);
               }}
             >
@@ -698,12 +899,11 @@ export function OrganizerGalleryShell({ eventId }: OrganizerGalleryShellProps) {
             </button>
           )}
 
-          {/* Next button */}
-          {previewIndex < galleryItems.length - 1 && (
+          {previewIndex < visibleGalleryItems.length - 1 && (
             <button
-              className="absolute right-4 top-1/2 -translate-y-1/2 text-white/80 hover:text-white p-3 rounded-full hover:bg-white/10 transition-colors"
-              onClick={(e) => {
-                e.stopPropagation();
+              className="absolute right-4 top-1/2 -translate-y-1/2 rounded-full p-3 text-white/80 transition-colors hover:bg-white/10 hover:text-white"
+              onClick={(event) => {
+                event.stopPropagation();
                 setPreviewIndex(previewIndex + 1);
               }}
             >
@@ -711,30 +911,25 @@ export function OrganizerGalleryShell({ eventId }: OrganizerGalleryShellProps) {
             </button>
           )}
 
-          {/* Image and details */}
-          <div
-            className="w-full max-w-[96vw] h-[92vh] flex flex-col gap-3 px-4"
-            onClick={(e) => e.stopPropagation()}
-          >
-            {/* Header info bar */}
-            <div className="sticky top-0 z-20 bg-white/10 backdrop-blur-sm rounded-lg px-4 py-3 text-white">
+          <div className="flex h-[92vh] w-full max-w-[96vw] flex-col gap-3 px-4" onClick={(event) => event.stopPropagation()}>
+            <div className="sticky top-0 z-20 rounded-lg bg-white/10 px-4 py-3 text-white backdrop-blur-sm">
               <div className="flex items-center justify-between gap-4">
                 <div className="min-w-0">
-                  <p className="font-medium truncate">{previewItem.uploaded_by || 'Unknown'}</p>
-                  <p className="text-sm text-white/70 truncate">
+                  <p className="truncate font-medium">{previewItem.uploaded_by || 'Unknown'}</p>
+                  <p className="truncate text-sm text-white/70">
                     {new Date(previewItem.uploaded_at).toLocaleString()} • {bytesToHuman(previewItem.size_bytes)}
                   </p>
-                  {previewItem.tags && previewItem.tags.length > 0 && (
+                  {(previewItem.tags ?? []).length > 0 && (
                     <div className="mt-2 flex flex-wrap gap-1">
-                      {previewItem.tags.map((tag) => (
-                        <Badge key={tag} variant="secondary" className="text-xs bg-white/20 text-white border-0">
+                      {(previewItem.tags ?? []).map((tag) => (
+                        <Badge key={tag} variant="secondary" className="border-0 bg-white/20 text-xs text-white">
                           {tag}
                         </Badge>
                       ))}
                     </div>
                   )}
                 </div>
-                <div className="flex gap-2 shrink-0">
+                <div className="flex shrink-0 gap-2">
                   <Button
                     size="sm"
                     variant="secondary"
@@ -754,28 +949,23 @@ export function OrganizerGalleryShell({ eventId }: OrganizerGalleryShellProps) {
                     )}
                     Download
                   </Button>
-                  <Button
-                    size="sm"
-                    variant="secondary"
-                    onClick={() => setPreviewIndex(null)}
-                  >
+                  <Button size="sm" variant="secondary" onClick={() => setPreviewIndex(null)}>
                     Close
                   </Button>
                 </div>
               </div>
             </div>
 
-            <div className="min-h-0 flex-1 flex items-center justify-center">
+            <div className="flex min-h-0 flex-1 items-center justify-center">
               <img
                 src={previewItem.original_url}
                 alt="Preview"
-                className="max-h-full max-w-full object-contain rounded-lg"
+                className="max-h-full max-w-full rounded-lg object-contain"
               />
             </div>
 
-            {/* Navigation indicator */}
             <div className="text-center text-sm text-white/50">
-              {previewIndex + 1} of {galleryItems.length} • Use ← → to navigate, ESC to close
+              {previewIndex + 1} of {visibleGalleryItems.length} • Use ← → to navigate, ESC to close
             </div>
           </div>
         </div>

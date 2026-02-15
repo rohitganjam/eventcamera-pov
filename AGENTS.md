@@ -21,6 +21,7 @@ When behavior or contracts change, keep these in sync:
 4. API client types (`packages/api-client/**`)
 
 Do not leave docs/spec stale after implementing behavior changes.
+- Also update relevant docs for architecture, setup, UX flows, and operational changes whenever implementation changes affect them.
 
 ## 3. Monorepo Layout and Stack
 
@@ -104,6 +105,7 @@ Do not reintroduce Vite for organizer/guest web apps.
 - Keep business/domain logic in backend services, not frontend components/hooks.
 - Preserve established API shapes unless explicitly changing contract.
 - For schema or endpoint changes, include migration/spec/doc updates in same PR/commit scope.
+- For non-schema behavior changes, still update impacted docs in `docs/**` as part of the same change.
 
 ## 9. Security and Secrets
 

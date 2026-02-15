@@ -2,6 +2,7 @@ import type { NextFunction, Request, Response } from 'express';
 
 import { env } from '../../config/env';
 import { runEventStatusSyncOnce } from '../../cron/event-status-cron';
+import { runMediaRetentionCleanupOnce } from '../../cron/media-retention-cron';
 import { AppError } from '../../shared/errors/app-error';
 
 function asyncHandler(
@@ -31,6 +32,16 @@ export const internalEventStatusSync = asyncHandler(async (req, res) => {
   assertInternalCronAuth(req);
 
   const result = await runEventStatusSyncOnce();
+  res.status(200).json({
+    success: true,
+    result
+  });
+});
+
+export const internalMediaRetentionCleanup = asyncHandler(async (req, res) => {
+  assertInternalCronAuth(req);
+
+  const result = await runMediaRetentionCleanupOnce();
   res.status(200).json({
     success: true,
     result

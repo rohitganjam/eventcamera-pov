@@ -39,6 +39,8 @@ This document tracks what is implemented vs what is pending.
 - [x] `0002_media_uploader_tags.sql`
 - [x] `0003_download_selected.sql`
 - [x] `0004_event_end_date.sql`
+- [x] `0005_event_status_cron.sql`
+- [x] `0006_media_retention_cron.sql`
 - [x] DB setup/check scripts (`apps/api/scripts/db/setup.sh`, `apps/api/scripts/db/check.sh`)
 - [x] API workspace scripts wired (`db:setup`, `db:check`)
 
@@ -56,6 +58,8 @@ This document tracks what is implemented vs what is pending.
 - [x] Open/close buffers set to 13 hours (open early, close late)
 - [x] In-process cron scheduler runs at 00:00 and 12:00 UTC (`apps/api/src/cron/event-status-cron.ts`)
 - [x] Internal protected trigger endpoint (`POST /api/internal/event-status-sync`)
+- [x] Daily media retention cleanup cron at 01:00 UTC (`apps/api/src/cron/media-retention-cron.ts`)
+- [x] Internal protected retention endpoint (`POST /api/internal/media-retention-cleanup`)
 - [x] Enable/disable cron via env (`ENABLE_CRON_JOBS`)
 
 ### Organizer backend

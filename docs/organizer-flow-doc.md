@@ -237,8 +237,22 @@ In the current web implementation, this opens on a dedicated page:
 
 ```
 GET /api/organizer/events/:id/gallery
-Query: { cursor?, limit?, sort?, filter_date?, filter_session?, filter_uploader?, filter_tag? }
+Query: { cursor?, limit?, sort?, sort_by?, sort_order?, filter_date?, filter_session?, filter_uploader?, filter_tag?, filter_file_type? }
 ```
+
+`filter_uploader` and `filter_tag` are comma-separated multi-select filters with OR semantics:
+- uploader filter: media matches if uploader is any selected name
+- tag filter: media matches if any selected tag exists on the media item
+- between filter groups (uploader/tag/file type/date/session), matching is AND
+
+For pre-populated filter options, the organizer app calls a separate facets endpoint:
+
+```
+GET /api/organizer/events/:id/gallery/facets
+Query: { uploader_q?, tag_q?, limit? }   // limit max: 500
+```
+
+This loads when the filter popup opens and is cached while the gallery page is open. The cache refreshes when the organizer uses the gallery refresh action or reopens the gallery page.
 
 **Pagination:** Cursor-based (not offset-based). Each response includes a `next_cursor` if more results exist. This performs well even with thousands of images.
 

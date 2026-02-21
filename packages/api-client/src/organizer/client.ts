@@ -17,6 +17,8 @@ import type {
   EventDetailResponse,
   EventMutationSuccessResponse,
   GalleryQuery,
+  GalleryFacetsQuery,
+  GalleryFacetsResponse,
   GalleryResponse,
   GalleryStatsResponse,
   GuestsResponse,
@@ -51,6 +53,11 @@ export interface OrganizerApiClient {
     query?: GalleryQuery,
     options?: OrganizerRequestOptions
   ): Promise<GalleryResponse>;
+  getGalleryFacets(
+    eventId: UUID,
+    query?: GalleryFacetsQuery,
+    options?: OrganizerRequestOptions
+  ): Promise<GalleryFacetsResponse>;
   getGalleryStats(eventId: UUID, options?: OrganizerRequestOptions): Promise<GalleryStatsResponse>;
   hideMedia(eventId: UUID, mediaId: UUID, options?: OrganizerRequestOptions): Promise<MediaMutationResponse>;
   unhideMedia(eventId: UUID, mediaId: UUID, options?: OrganizerRequestOptions): Promise<MediaMutationResponse>;
@@ -192,6 +199,15 @@ export function createOrganizerApiClient(config: OrganizerClientConfig): Organiz
       return withAuth({
         method: 'GET',
         path: `/api/organizer/events/${encodePathSegment(eventId)}/gallery`,
+        query,
+        request: options
+      });
+    },
+
+    getGalleryFacets(eventId, query, options) {
+      return withAuth({
+        method: 'GET',
+        path: `/api/organizer/events/${encodePathSegment(eventId)}/gallery/facets`,
         query,
         request: options
       });

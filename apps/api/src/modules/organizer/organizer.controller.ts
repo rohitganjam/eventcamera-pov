@@ -29,6 +29,27 @@ function parseOptionalNumber(value: unknown): number | undefined {
   return undefined;
 }
 
+function parseGallerySortBy(value: unknown): 'uploaded_at' | 'uploader' | 'tag' | undefined {
+  if (value === 'uploaded_at' || value === 'uploader' || value === 'tag') {
+    return value;
+  }
+  return undefined;
+}
+
+function parseGallerySortOrder(value: unknown): 'asc' | 'desc' | undefined {
+  if (value === 'asc' || value === 'desc') {
+    return value;
+  }
+  return undefined;
+}
+
+function parseGalleryFileType(value: unknown): 'image' | 'video' | undefined {
+  if (value === 'image' || value === 'video') {
+    return value;
+  }
+  return undefined;
+}
+
 function parseBearerToken(headerValue: string | undefined): string | null {
   if (!headerValue) return null;
 
@@ -136,13 +157,30 @@ export const organizerGetGallery = asyncHandler(async (req, res) => {
   const payload = await organizerService.getGallery(organizerId, req.params.id, {
     cursor: typeof req.query.cursor === 'string' ? req.query.cursor : undefined,
     limit: parseOptionalNumber(req.query.limit),
-    sort: req.query.sort === 'oldest' ? 'oldest' : 'newest',
+    sort:
+      req.query.sort === 'oldest' || req.query.sort === 'newest'
+        ? req.query.sort
+        : undefined,
+    sort_by: parseGallerySortBy(req.query.sort_by),
+    sort_order: parseGallerySortOrder(req.query.sort_order),
     filter_date: typeof req.query.filter_date === 'string' ? req.query.filter_date : undefined,
     filter_session:
       typeof req.query.filter_session === 'string' ? req.query.filter_session : undefined,
     filter_uploader:
       typeof req.query.filter_uploader === 'string' ? req.query.filter_uploader : undefined,
-    filter_tag: typeof req.query.filter_tag === 'string' ? req.query.filter_tag : undefined
+    filter_tag: typeof req.query.filter_tag === 'string' ? req.query.filter_tag : undefined,
+    filter_file_type: parseGalleryFileType(req.query.filter_file_type)
+  });
+
+  res.status(200).json(payload);
+});
+
+export const organizerGetGalleryFacets = asyncHandler(async (req, res) => {
+  const organizerId = getOrganizerId(req);
+  const payload = await organizerService.getGalleryFacets(organizerId, req.params.id, {
+    uploader_q: typeof req.query.uploader_q === 'string' ? req.query.uploader_q : undefined,
+    tag_q: typeof req.query.tag_q === 'string' ? req.query.tag_q : undefined,
+    limit: parseOptionalNumber(req.query.limit)
   });
 
   res.status(200).json(payload);

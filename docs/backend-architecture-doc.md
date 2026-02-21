@@ -84,7 +84,7 @@ CREATE INDEX idx_events_date_window ON events(event_date, end_date);
 ```
 
 **Compression mode:**
-- `compressed` (default): Client compresses images to max 1920px, JPEG 0.8 quality before upload.
+- `compressed` (default): Client converts uploads to JPEG, resizes long side to max 4000px, and encodes at JPEG quality 0.8 before upload.
 - `raw`: Client uploads original files without compression. Available for an additional fee.
 
 **Fee fields:**
@@ -190,7 +190,33 @@ CREATE INDEX idx_media_storage_cleanup ON media(status, storage_deleted_at, crea
 
 The `idx_media_pending_cleanup` partial index is specifically for the orphan cleanup job — it only indexes rows where `status = 'pending'`, keeping the index small and fast.
 
-### 3.4 organizers
+### 3.4 gallery facet tables
+
+Precomputed facet tables support fast organizer filter-option loading:
+
+```sql
+CREATE TABLE event_uploader_facets (
+  event_id       UUID NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+  uploader_name  TEXT NOT NULL,
+  media_count    INT NOT NULL DEFAULT 0 CHECK (media_count >= 0),
+  updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (event_id, uploader_name)
+);
+
+CREATE TABLE event_tag_facets (
+  event_id       UUID NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+  tag            TEXT NOT NULL,
+  media_count    INT NOT NULL DEFAULT 0 CHECK (media_count >= 0),
+  updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (event_id, tag)
+);
+```
+
+- Incremental updates happen on upload completion and cleanup transitions.
+- Daily `data-cleanup` cron also rebuilds these tables to reconcile drift.
+- Organizer filter options are fetched from `/api/organizer/events/:id/gallery/facets` with `limit <= 500`.
+
+### 3.5 organizers
 
 ```sql
 CREATE TABLE organizers (
@@ -201,7 +227,7 @@ CREATE TABLE organizers (
 );
 ```
 
-### 3.5 event_organizers
+### 3.6 event_organizers
 
 ```sql
 CREATE TABLE event_organizers (

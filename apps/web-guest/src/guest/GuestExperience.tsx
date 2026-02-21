@@ -44,6 +44,10 @@ interface UploadDraft {
   error: string | null;
 }
 
+const COMPRESSED_MAX_LONG_SIDE_PX = 4000;
+const COMPRESSED_JPEG_QUALITY = 0.8;
+const HEIC_MIME_FRAGMENTS = ['heic', 'heif'] as const;
+
 function formatApiError(error: unknown): string {
   if (error instanceof GuestApiError) {
     return `${error.code}: ${error.message}`;
@@ -110,6 +114,132 @@ async function createThumbnailBlob(file: File): Promise<Blob | null> {
     };
     image.src = objectUrl;
   });
+}
+
+async function loadImageElement(file: File): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    const objectUrl = URL.createObjectURL(file);
+
+    image.onload = () => {
+      URL.revokeObjectURL(objectUrl);
+      resolve(image);
+    };
+
+    image.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      reject(new Error('Failed to decode image for compression.'));
+    };
+
+    image.src = objectUrl;
+  });
+}
+
+async function createJpegBlobFromImage(
+  image: HTMLImageElement,
+  maxLongSidePx: number,
+  quality: number
+): Promise<Blob> {
+  const width = image.naturalWidth || image.width;
+  const height = image.naturalHeight || image.height;
+  if (!width || !height) {
+    throw new Error('Image dimensions are invalid.');
+  }
+
+  const scale = Math.min(1, maxLongSidePx / Math.max(width, height));
+  const targetWidth = Math.max(1, Math.round(width * scale));
+  const targetHeight = Math.max(1, Math.round(height * scale));
+
+  const canvas = document.createElement('canvas');
+  canvas.width = targetWidth;
+  canvas.height = targetHeight;
+
+  const context = canvas.getContext('2d');
+  if (!context) {
+    throw new Error('Failed to initialize canvas for compression.');
+  }
+
+  context.drawImage(image, 0, 0, targetWidth, targetHeight);
+
+  const jpegBlob = await new Promise<Blob | null>((resolve) => {
+    canvas.toBlob(resolve, 'image/jpeg', quality);
+  });
+
+  if (!jpegBlob) {
+    throw new Error('Failed to encode compressed image.');
+  }
+
+  return jpegBlob;
+}
+
+function toJpegFileName(fileName: string): string {
+  const trimmed = fileName.trim();
+  if (!trimmed) return 'upload.jpg';
+  const base = trimmed.replace(/\.[^/.]+$/, '');
+  return `${base || 'upload'}.jpg`;
+}
+
+function isHeicLikeFile(file: File): boolean {
+  const normalizedType = file.type.toLowerCase();
+  return HEIC_MIME_FRAGMENTS.some((fragment) => normalizedType.includes(fragment));
+}
+
+async function convertHeicToJpeg(file: File): Promise<File> {
+  const module = await import('heic-to');
+  const converted = await module.heicTo({
+    blob: file,
+    type: 'image/jpeg',
+    quality: COMPRESSED_JPEG_QUALITY
+  });
+
+  if (!(converted instanceof Blob)) {
+    throw new Error('HEIC conversion did not return a file blob.');
+  }
+
+  return new File([converted], toJpegFileName(file.name), {
+    type: 'image/jpeg',
+    lastModified: file.lastModified
+  });
+}
+
+async function prepareUploadFile(file: File, compressionMode: 'compressed' | 'raw'): Promise<File> {
+  if (compressionMode !== 'compressed') {
+    return file;
+  }
+
+  if (!file.type.startsWith('image/')) {
+    throw new Error('Only image files are allowed in Standard mode.');
+  }
+
+  let sourceFile = file;
+  if (isHeicLikeFile(file)) {
+    try {
+      sourceFile = await convertHeicToJpeg(file);
+    } catch (error) {
+      console.warn('HEIC conversion failed; uploading original file in compressed mode.', error);
+      return file;
+    }
+  }
+
+  try {
+    const image = await loadImageElement(sourceFile);
+    const jpegBlob = await createJpegBlobFromImage(
+      image,
+      COMPRESSED_MAX_LONG_SIDE_PX,
+      COMPRESSED_JPEG_QUALITY
+    );
+
+    return new File([jpegBlob], toJpegFileName(sourceFile.name), {
+      type: 'image/jpeg',
+      lastModified: sourceFile.lastModified
+    });
+  } catch (error) {
+    if (isHeicLikeFile(file)) {
+      console.warn('HEIC compressed-mode fallback activated; uploading original file.', error);
+      return file;
+    }
+    throw error;
+  }
 }
 
 async function createDraftPreviewUrl(file: File): Promise<string> {
@@ -323,31 +453,36 @@ export function GuestExperience({ slug }: GuestExperienceProps) {
       return;
     }
 
-    if (!draft.file.type) {
-      patchDraft(draft.id, {
-        status: 'failed',
-        error: 'File type is missing. Please choose another file.'
-      });
-      return;
-    }
-
     patchDraft(draft.id, { status: 'uploading', error: null });
     setError(null);
     setMessage(null);
 
     try {
+      const preparedFile = await prepareUploadFile(
+        draft.file,
+        sessionPayload.event.compression_mode
+      );
+
+      if (!preparedFile.type) {
+        patchDraft(draft.id, {
+          status: 'failed',
+          error: 'File type is missing. Please choose another file.'
+        });
+        return;
+      }
+
       const createUpload = await guestApi.createUpload({
-        file_type: draft.file.type,
-        file_size: draft.file.size,
+        file_type: preparedFile.type,
+        file_size: preparedFile.size,
         tags: draft.tags
       });
 
       const originalUpload = await fetch(createUpload.upload_url, {
         method: 'PUT',
         headers: {
-          'content-type': draft.file.type
+          'content-type': preparedFile.type
         },
-        body: draft.file
+        body: preparedFile
       });
 
       if (!originalUpload.ok) {
@@ -355,7 +490,7 @@ export function GuestExperience({ slug }: GuestExperienceProps) {
       }
 
       if (createUpload.thumb_upload_url) {
-        const thumbBlob = await createThumbnailBlob(draft.file);
+        const thumbBlob = await createThumbnailBlob(preparedFile);
         if (thumbBlob) {
           await fetch(createUpload.thumb_upload_url, {
             method: 'PUT',
@@ -705,84 +840,82 @@ export function GuestExperience({ slug }: GuestExperienceProps) {
                 </label>
 
                 {hasPendingDrafts && (
-                  <Button
-                    onClick={() => void handleUploadAll()}
-                    disabled={isUploadingAll}
-                    className="w-full"
-                  >
-                    <Upload className="h-4 w-4" />
-                    {isUploadingAll ? 'Uploading...' : `Upload All (${drafts.filter(d => d.status !== 'uploaded').length})`}
-                  </Button>
+                  <>
+                    <Button
+                      onClick={() => void handleUploadAll()}
+                      disabled={isUploadingAll}
+                      className="w-full"
+                    >
+                      <Upload className="h-4 w-4" />
+                      {isUploadingAll ? 'Uploading...' : `Upload All (${drafts.filter(d => d.status !== 'uploaded').length})`}
+                    </Button>
+
+                    <div className="space-y-3 border-t pt-4">
+                      <div>
+                        <h3 className="text-lg font-semibold">Upload Queue</h3>
+                        <p className="text-sm text-muted-foreground">
+                          {drafts.filter(d => d.status === 'uploaded').length} of {drafts.length} uploaded
+                        </p>
+                      </div>
+
+                      <ul className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+                        {drafts.map((draft) => (
+                          <li
+                            key={draft.id}
+                            className="overflow-hidden rounded-lg border bg-card"
+                          >
+                            <div className="relative aspect-square bg-muted">
+                              <img
+                                src={draft.previewUrl}
+                                alt={draft.file.name}
+                                className="h-full w-full object-cover"
+                              />
+                              <Button
+                                size="icon"
+                                variant="secondary"
+                                className="absolute right-2 top-2 h-8 w-8"
+                                onClick={() => removeDraft(draft.id)}
+                                disabled={draft.status === 'uploading'}
+                                aria-label={`Remove ${draft.file.name}`}
+                              >
+                                <X className="h-4 w-4" />
+                              </Button>
+                              {draft.status !== 'queued' && (
+                                <Badge
+                                  variant={getStatusVariant(draft.status)}
+                                  className="absolute bottom-2 left-2 capitalize"
+                                >
+                                  {draft.status}
+                                </Badge>
+                              )}
+                            </div>
+
+                            <div className="space-y-2 p-2">
+                              <TagInput
+                                label="Tags (comma separated)"
+                                value={draft.tags}
+                                onChange={(nextTags) => patchDraft(draft.id, { tags: nextTags })}
+                                disabled={draft.status === 'uploading'}
+                                placeholder="Add tag and press Enter"
+                              />
+                              <p className="truncate text-xs text-muted-foreground">
+                                {draft.file.name}
+                              </p>
+
+                              {draft.error && (
+                                <Alert variant="destructive">
+                                  <AlertDescription>{draft.error}</AlertDescription>
+                                </Alert>
+                              )}
+                            </div>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  </>
                 )}
               </CardContent>
             </Card>
-
-            {/* Upload Queue */}
-            {hasPendingDrafts && (
-              <Card>
-                <CardHeader className="pb-3">
-                  <CardTitle className="text-lg">Upload Queue</CardTitle>
-                  <CardDescription>
-                    {drafts.filter(d => d.status === 'uploaded').length} of {drafts.length} uploaded
-                  </CardDescription>
-                </CardHeader>
-                <CardContent>
-                  <ul className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-                    {drafts.map((draft) => (
-                      <li
-                        key={draft.id}
-                        className="overflow-hidden rounded-lg border bg-card"
-                      >
-                        <div className="relative aspect-square bg-muted">
-                          <img
-                            src={draft.previewUrl}
-                            alt={draft.file.name}
-                            className="h-full w-full object-cover"
-                          />
-                          <Button
-                            size="icon"
-                            variant="secondary"
-                            className="absolute right-2 top-2 h-8 w-8"
-                            onClick={() => removeDraft(draft.id)}
-                            disabled={draft.status === 'uploading'}
-                            aria-label={`Remove ${draft.file.name}`}
-                          >
-                            <X className="h-4 w-4" />
-                          </Button>
-                          {draft.status !== 'queued' && (
-                            <Badge
-                              variant={getStatusVariant(draft.status)}
-                              className="absolute bottom-2 left-2 capitalize"
-                            >
-                              {draft.status}
-                            </Badge>
-                          )}
-                        </div>
-
-                        <div className="space-y-2 p-2">
-                          <TagInput
-                            label="Tags (comma separated)"
-                            value={draft.tags}
-                            onChange={(nextTags) => patchDraft(draft.id, { tags: nextTags })}
-                            disabled={draft.status === 'uploading'}
-                            placeholder="Add tag and press Enter"
-                          />
-                          <p className="truncate text-xs text-muted-foreground">
-                            {draft.file.name}
-                          </p>
-
-                          {draft.error && (
-                            <Alert variant="destructive">
-                              <AlertDescription>{draft.error}</AlertDescription>
-                            </Alert>
-                          )}
-                        </div>
-                      </li>
-                    ))}
-                  </ul>
-                </CardContent>
-              </Card>
-            )}
 
             {/* My Uploads */}
             <Card>

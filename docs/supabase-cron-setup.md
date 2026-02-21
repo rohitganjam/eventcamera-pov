@@ -5,11 +5,13 @@ This setup triggers internal API cron endpoints from Supabase:
 - `POST /api/internal/event-status-sync` every 12 hours (`00:00` and `12:00` UTC)
 - `POST /api/internal/data-cleanup` daily at `01:00` UTC
   - this job also deletes expired organizer API sessions from `organizer_sessions`
+  - this job also runs gallery facet reconciliation (`event_uploader_facets`, `event_tag_facets`)
 
 `npm run db:setup --workspace @poveventcam/api` now also applies migrations:
 
 - `0005_event_status_cron.sql`
 - `0006_media_retention_cron.sql`
+- `0008_gallery_facets.sql`
 
 Both are idempotent and auto-create/update jobs when prerequisites are present.
 

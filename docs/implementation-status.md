@@ -1,6 +1,6 @@
 # POV EventCamera Implementation Status
 
-Last updated: 2026-02-15
+Last updated: 2026-02-18
 
 This document tracks what is implemented vs what is pending.
 
@@ -41,6 +41,8 @@ This document tracks what is implemented vs what is pending.
 - [x] `0004_event_end_date.sql`
 - [x] `0005_event_status_cron.sql`
 - [x] `0006_media_retention_cron.sql`
+- [x] `0007_organizer_sessions.sql`
+- [x] `0008_gallery_facets.sql`
 - [x] DB setup/check scripts (`apps/api/scripts/db/setup.sh`, `apps/api/scripts/db/check.sh`)
 - [x] API workspace scripts wired (`db:setup`, `db:check`)
 
@@ -73,6 +75,7 @@ This document tracks what is implemented vs what is pending.
 - [x] Capacity update API with payment redirect response shape
 - [x] Gallery list with pagination (`cursor`, `limit`) and sort (`newest`/`oldest`)
 - [x] Gallery filters (uploader, tags, date, session)
+- [x] Gallery facets endpoint for searchable filter options (`GET /events/:id/gallery/facets`)
 - [x] Gallery stats endpoint
 - [x] Hide/unhide/bulk-hide media
 - [x] Single media download URL endpoint
@@ -118,6 +121,8 @@ This document tracks what is implemented vs what is pending.
 - [x] Prev/next page controls
 - [x] Gallery filters by uploader and tags
 - [x] "Show not yet downloaded" filter
+- [x] Async gallery facet option loading (non-blocking for initial gallery paint)
+- [x] Searchable facet filter UI for uploader and tags (API-backed)
 - [x] Selection model:
 - [x] Select/deselect individual items
 - [x] Select all current page (loads remaining page items first)
@@ -211,3 +216,4 @@ This document tracks what is implemented vs what is pending.
 - Updated organizer UI with shared header, refreshed dashboard cards, and QR-based share modal.
 - Updated guest upload UX with local preview queue, tag input component, upload-all flow, queue purge behavior, and full-screen original-image preview.
 - Synced OpenAPI and architecture docs with current auth model, internal routes, and storage backend.
+- Added gallery facet tables + API-backed searchable facet options and integrated facet reconciliation into daily `data-cleanup` cron.

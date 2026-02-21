@@ -1,12 +1,13 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 
 import { env } from '../../config/env';
-import { query } from '../../lib/db';
+import { query, withTransaction } from '../../lib/db';
 import {
   createSignedStorageObjectUrl,
   createSignedStorageUploadUrl,
   doesStorageObjectExist
 } from '../../lib/storage';
+import { addMediaToGalleryFacets } from '../organizer/gallery-facets.service';
 import { AppError } from '../../shared/errors/app-error';
 
 import { EventStatus } from '../../shared/types/event-status';
@@ -88,6 +89,12 @@ interface DbMediaRow {
   media_id: string;
   status: MediaStatus;
   storage_path: string;
+}
+
+interface DbCompletedMediaRow extends DbMediaRow {
+  event_id: string;
+  uploader_name: string | null;
+  tags: string[] | null;
 }
 
 interface DbMediaListRow {
@@ -796,26 +803,38 @@ async function completeUpload(
     throw new AppError(409, 'UPLOAD_NOT_FOUND', 'Uploaded object not found in storage');
   }
 
-  const updateResult = await query<DbMediaRow>(
-    `
-      UPDATE media
-      SET
-        status = 'uploaded',
-        uploaded_at = now()
-      WHERE id = $1::uuid
-        AND device_session_id = $2::uuid
-        AND status = 'pending'
-      RETURNING
-        id AS media_id,
-        status,
-        storage_path
-    `,
-    [mediaId, session.session.session_id]
-  );
+  await withTransaction(async (client) => {
+    const updateResult = await client.query<DbCompletedMediaRow>(
+      `
+        UPDATE media
+        SET
+          status = 'uploaded',
+          uploaded_at = now()
+        WHERE id = $1::uuid
+          AND device_session_id = $2::uuid
+          AND status = 'pending'
+        RETURNING
+          id AS media_id,
+          event_id,
+          status,
+          storage_path,
+          uploader_name,
+          tags
+      `,
+      [mediaId, session.session.session_id]
+    );
 
-  if (!updateResult.rows[0]) {
-    throw new AppError(409, 'MEDIA_STATE_CONFLICT', 'Media upload state changed; retry request');
-  }
+    const updated = updateResult.rows[0];
+    if (!updated) {
+      throw new AppError(409, 'MEDIA_STATE_CONFLICT', 'Media upload state changed; retry request');
+    }
+
+    await addMediaToGalleryFacets(client, {
+      event_id: updated.event_id,
+      uploader_name: updated.uploader_name,
+      tags: updated.tags
+    });
+  });
 
   return {
     success: true,

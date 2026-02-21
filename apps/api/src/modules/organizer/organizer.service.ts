@@ -9,6 +9,9 @@ import { AppError } from '../../shared/errors/app-error';
 import { EventStatus } from '../../shared/types/event-status';
 
 type CompressionMode = 'compressed' | 'raw';
+type GallerySortBy = 'uploaded_at' | 'uploader' | 'tag';
+type GallerySortOrder = 'asc' | 'desc';
+type GalleryFileType = 'image' | 'video';
 // EventStatus type removed, imported from shared
 type MediaStatus = 'uploaded' | 'hidden' | 'pending' | 'failed' | 'expired';
 type JobStatus = 'queued' | 'processing' | 'complete' | 'failed';
@@ -43,10 +46,29 @@ interface GalleryQueryInput {
   cursor?: string;
   limit?: number;
   sort?: 'newest' | 'oldest';
+  sort_by?: GallerySortBy;
+  sort_order?: GallerySortOrder;
   filter_date?: string;
   filter_session?: string;
   filter_uploader?: string;
   filter_tag?: string;
+  filter_file_type?: GalleryFileType;
+}
+
+interface GalleryFacetsQueryInput {
+  uploader_q?: string;
+  tag_q?: string;
+  limit?: number;
+}
+
+interface DbGalleryFacetRow {
+  value: string;
+  count: number;
+}
+
+interface DbFileTypeFacetRow {
+  image_count: number;
+  video_count: number;
 }
 
 interface DbEventRow {
@@ -212,6 +234,54 @@ function parseTagFilter(value: unknown): string[] {
   return [...new Set(tags)].slice(0, 8);
 }
 
+function parseUploaderFilter(value: unknown): string[] {
+  const source = ensureOptionalShortString(value, 'filter_uploader', 4000);
+  if (!source) return [];
+
+  const uploaders = source
+    .split(',')
+    .map((uploader) => uploader.trim().toLowerCase())
+    .filter(Boolean);
+
+  return [...new Set(uploaders)].slice(0, 50);
+}
+
+function parseGallerySortBy(value: unknown): GallerySortBy | undefined {
+  const source = ensureOptionalShortString(value, 'sort_by', 40);
+  if (!source) return undefined;
+  if (source === 'uploaded_at' || source === 'uploader' || source === 'tag') {
+    return source;
+  }
+
+  throw new AppError(400, 'VALIDATION_ERROR', 'sort_by must be one of uploaded_at, uploader, tag', {
+    field: 'sort_by'
+  });
+}
+
+function parseGallerySortOrder(value: unknown): GallerySortOrder | undefined {
+  const source = ensureOptionalShortString(value, 'sort_order', 20);
+  if (!source) return undefined;
+  if (source === 'asc' || source === 'desc') {
+    return source;
+  }
+
+  throw new AppError(400, 'VALIDATION_ERROR', 'sort_order must be either asc or desc', {
+    field: 'sort_order'
+  });
+}
+
+function parseGalleryFileType(value: unknown): GalleryFileType | undefined {
+  const source = ensureOptionalShortString(value, 'filter_file_type', 20);
+  if (!source) return undefined;
+  if (source === 'image' || source === 'video') {
+    return source;
+  }
+
+  throw new AppError(400, 'VALIDATION_ERROR', 'filter_file_type must be either image or video', {
+    field: 'filter_file_type'
+  });
+}
+
 function ensureCompressionMode(value: unknown, fieldName: string): CompressionMode {
   if (value === 'compressed' || value === 'raw') {
     return value;
@@ -310,6 +380,14 @@ function parseLimit(value: number | undefined): number {
   if (value === undefined) return 50;
   if (!Number.isInteger(value) || value < 1 || value > 200) {
     throw new AppError(400, 'VALIDATION_ERROR', 'limit must be between 1 and 200');
+  }
+  return value;
+}
+
+function parseFacetLimit(value: number | undefined): number {
+  if (value === undefined) return 500;
+  if (!Number.isInteger(value) || value < 1 || value > 500) {
+    throw new AppError(400, 'VALIDATION_ERROR', 'limit must be between 1 and 500');
   }
   return value;
 }
@@ -839,26 +917,38 @@ class OrganizerService {
       whereParts.push(`m.device_session_id = $${whereParams.length}::uuid`);
     }
 
-    const uploaderFilter = ensureOptionalShortString(
-      queryInput.filter_uploader,
-      'filter_uploader',
-      120
-    );
-    if (uploaderFilter) {
-      whereParams.push(`%${uploaderFilter.toLowerCase()}%`);
+    const uploaderFilter = parseUploaderFilter(queryInput.filter_uploader);
+    if (uploaderFilter.length > 0) {
+      whereParams.push(uploaderFilter);
       whereParts.push(
-        `LOWER(COALESCE(m.uploader_name, ds.display_name, '')) LIKE $${whereParams.length}`
+        `LOWER(COALESCE(m.uploader_name, ds.display_name, '')) = ANY($${whereParams.length}::text[])`
       );
     }
 
     const tagFilter = parseTagFilter(queryInput.filter_tag);
     if (tagFilter.length > 0) {
       whereParams.push(tagFilter);
-      whereParts.push(`m.tags @> $${whereParams.length}::text[]`);
+      whereParts.push(`COALESCE(m.tags, ARRAY[]::text[]) && $${whereParams.length}::text[]`);
+    }
+
+    const fileTypeFilter = parseGalleryFileType(queryInput.filter_file_type);
+    if (fileTypeFilter) {
+      whereParams.push(`${fileTypeFilter}/%`);
+      whereParts.push(`m.mime_type ILIKE $${whereParams.length}`);
     }
 
     const whereSql = whereParts.join(' AND ');
-    const sort = queryInput.sort === 'oldest' ? 'ASC' : 'DESC';
+    const legacySortOrder = queryInput.sort === 'oldest' ? 'asc' : queryInput.sort === 'newest' ? 'desc' : undefined;
+    const sortBy = parseGallerySortBy(queryInput.sort_by) ?? 'uploaded_at';
+    const sortOrder = (parseGallerySortOrder(queryInput.sort_order) ?? legacySortOrder ?? 'desc').toUpperCase();
+
+    const orderByClause =
+      sortBy === 'uploader'
+        ? `LOWER(COALESCE(m.uploader_name, ds.display_name, '')) ${sortOrder}, COALESCE(m.uploaded_at, m.created_at) DESC`
+        : sortBy === 'tag'
+          ? `LOWER(COALESCE((SELECT MIN(tag_item) FROM unnest(COALESCE(m.tags, ARRAY[]::text[])) AS tag_item), '')) ${sortOrder}, COALESCE(m.uploaded_at, m.created_at) DESC`
+          : `COALESCE(m.uploaded_at, m.created_at) ${sortOrder}`;
+
     const fromSql = 'FROM media m LEFT JOIN device_sessions ds ON ds.id = m.device_session_id';
 
     const countResult = await query<{ total_count: number }>(
@@ -885,7 +975,7 @@ class OrganizerService {
           m.tags
         ${fromSql}
         WHERE ${whereSql}
-        ORDER BY COALESCE(m.uploaded_at, m.created_at) ${sort}
+        ORDER BY ${orderByClause}
         LIMIT ${limitParam}
         OFFSET ${offsetParam}
       `,
@@ -924,6 +1014,78 @@ class OrganizerService {
       media,
       next_cursor: nextCursor,
       total_count: totalCount
+    };
+  }
+
+  async getGalleryFacets(organizerId: string, eventId: string, queryInput: GalleryFacetsQueryInput) {
+    ensureUuid(organizerId, 'organizer_id');
+    ensureUuid(eventId, 'event_id');
+    await queryOwnedEventBase(organizerId, eventId);
+
+    const limit = parseFacetLimit(queryInput.limit);
+    const uploaderSearch = ensureOptionalShortString(queryInput.uploader_q, 'uploader_q', 80);
+    const tagSearch = ensureOptionalShortString(queryInput.tag_q, 'tag_q', 80);
+    const uploaderPattern = uploaderSearch ? `%${uploaderSearch}%` : null;
+    const tagPattern = tagSearch ? `%${tagSearch.toLowerCase()}%` : null;
+
+    const uploaderResult = await query<DbGalleryFacetRow>(
+      `
+        SELECT
+          f.uploader_name AS value,
+          f.media_count::int AS count
+        FROM event_uploader_facets f
+        WHERE f.event_id = $1::uuid
+          AND ($2::text IS NULL OR f.uploader_name ILIKE $2)
+        ORDER BY f.media_count DESC, f.uploader_name ASC
+        LIMIT $3::int
+      `,
+      [eventId, uploaderPattern, limit]
+    );
+
+    const tagResult = await query<DbGalleryFacetRow>(
+      `
+        SELECT
+          f.tag AS value,
+          f.media_count::int AS count
+        FROM event_tag_facets f
+        WHERE f.event_id = $1::uuid
+          AND ($2::text IS NULL OR f.tag ILIKE $2)
+        ORDER BY f.media_count DESC, f.tag ASC
+        LIMIT $3::int
+      `,
+      [eventId, tagPattern, limit]
+    );
+
+    const fileTypeResult = await query<DbFileTypeFacetRow>(
+      `
+        SELECT
+          COUNT(*) FILTER (WHERE m.mime_type ILIKE 'image/%')::int AS image_count,
+          COUNT(*) FILTER (WHERE m.mime_type ILIKE 'video/%')::int AS video_count
+        FROM media m
+        WHERE m.event_id = $1::uuid
+          AND m.status IN ('uploaded', 'hidden')
+      `,
+      [eventId]
+    );
+
+    const imageCount = fileTypeResult.rows[0]?.image_count ?? 0;
+    const videoCount = fileTypeResult.rows[0]?.video_count ?? 0;
+
+    return {
+      uploaders: uploaderResult.rows,
+      tags: tagResult.rows,
+      file_types: [
+        {
+          value: 'image',
+          count: imageCount
+        },
+        {
+          value: 'video',
+          count: videoCount
+        }
+      ],
+      generated_at: new Date().toISOString(),
+      limit
     };
   }
 

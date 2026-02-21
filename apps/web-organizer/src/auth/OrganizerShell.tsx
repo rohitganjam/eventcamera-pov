@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { FormEvent, useEffect, useMemo, useState } from 'react';
+import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Plus,
   RefreshCw,
@@ -18,7 +18,12 @@ import {
   QrCode,
   Share2
 } from 'lucide-react';
-import { ApiClientError, type EventSummary } from '@poveventcam/api-client';
+import {
+  ApiClientError,
+  COMPRESSION_MODE,
+  type CompressionMode,
+  type EventSummary
+} from '@poveventcam/api-client';
 
 import { organizerApi } from '../lib/organizer-api';
 import { useAuth } from './AuthProvider';
@@ -45,8 +50,6 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 
-type CompressionMode = 'compressed' | 'raw';
-
 interface CreateEventFormState {
   name: string;
   eventDate: string;
@@ -63,7 +66,7 @@ const DEFAULT_FORM: CreateEventFormState = {
   endDate: new Date().toISOString().slice(0, 10),
   maxGuests: '100',
   maxUploadsPerGuest: '10',
-  compressionMode: 'compressed',
+  compressionMode: COMPRESSION_MODE.COMPRESSED,
   pin: ''
 };
 
@@ -102,12 +105,22 @@ function formatAmountMinor(amount: number, currency: string): string {
   return `${currency} ${(amount / 100).toFixed(2)}`;
 }
 
+function getCompressionModeLabel(mode: CompressionMode): string {
+  if (mode === COMPRESSION_MODE.RAW) {
+    return 'Original Quality';
+  }
+
+  return 'Standard';
+}
+
 function buildQrImageUrl(url: string): string {
   return `https://api.qrserver.com/v1/create-qr-code/?size=320x320&data=${encodeURIComponent(url)}`;
 }
 
 export function OrganizerShell() {
   const { session, signOut } = useAuth();
+  const eventDateInputRef = useRef<HTMLInputElement>(null);
+  const endDateInputRef = useRef<HTMLInputElement>(null);
 
   const [events, setEvents] = useState<EventSummary[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -304,6 +317,18 @@ export function OrganizerShell() {
     }
   }
 
+  function openDatePicker(ref: React.RefObject<HTMLInputElement | null>): void {
+    const input = ref.current;
+    if (!input) return;
+
+    const pickerInput = input as HTMLInputElement & { showPicker?: () => void };
+    try {
+      pickerInput.showPicker?.();
+    } catch {
+      // Ignore browsers/user-gesture contexts where showPicker cannot be invoked.
+    }
+  }
+
   return (
     <main className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100">
       <OrganizerHeader
@@ -384,7 +409,8 @@ export function OrganizerShell() {
                           <span>{item.max_uploads_per_guest} img/guest</span>
                         </div>
                         <div className="text-xs text-muted-foreground">
-                          {formatAmountMinor(item.total_fee, item.currency)} • {item.compression_mode}
+                          {formatAmountMinor(item.total_fee, item.currency)} •{' '}
+                          {getCompressionModeLabel(item.compression_mode)}
                         </div>
                       </div>
 
@@ -510,7 +536,7 @@ export function OrganizerShell() {
                 type="text"
                 value={form.name}
                 onChange={(next) => setForm((current) => ({ ...current, name: next.target.value }))}
-                placeholder="Rohit and Jyoti Wedding"
+                placeholder="My Wedding"
                 required
               />
             </div>
@@ -518,25 +544,39 @@ export function OrganizerShell() {
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-2">
                 <Label htmlFor="event-date">Event date</Label>
-                <Input
-                  id="event-date"
-                  type="date"
-                  value={form.eventDate}
-                  onChange={(next) => setForm((current) => ({ ...current, eventDate: next.target.value }))}
-                  required
-                />
+                <div className="w-full">
+                  <Input
+                    ref={eventDateInputRef}
+                    id="event-date"
+                    type="date"
+                    value={form.eventDate}
+                    onChange={(next) =>
+                      setForm((current) => ({ ...current, eventDate: next.target.value }))
+                    }
+                    onClick={() => openDatePicker(eventDateInputRef)}
+                    className="block w-full cursor-pointer [&::-webkit-calendar-picker-indicator]:ml-auto [&::-webkit-calendar-picker-indicator]:cursor-pointer"
+                    required
+                  />
+                </div>
               </div>
 
               <div className="space-y-2">
                 <Label htmlFor="end-date">End date</Label>
-                <Input
-                  id="end-date"
-                  type="date"
-                  min={form.eventDate}
-                  value={form.endDate}
-                  onChange={(next) => setForm((current) => ({ ...current, endDate: next.target.value }))}
-                  required
-                />
+                <div className="w-full">
+                  <Input
+                    ref={endDateInputRef}
+                    id="end-date"
+                    type="date"
+                    min={form.eventDate}
+                    value={form.endDate}
+                    onChange={(next) =>
+                      setForm((current) => ({ ...current, endDate: next.target.value }))
+                    }
+                    onClick={() => openDatePicker(endDateInputRef)}
+                    className="block w-full cursor-pointer [&::-webkit-calendar-picker-indicator]:ml-auto [&::-webkit-calendar-picker-indicator]:cursor-pointer"
+                    required
+                  />
+                </div>
               </div>
             </div>
 
@@ -572,7 +612,7 @@ export function OrganizerShell() {
 
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-2">
-                <Label htmlFor="compression-mode">Compression mode</Label>
+                <Label htmlFor="compression-mode">File Upload Quality</Label>
                 <Select
                   value={form.compressionMode}
                   onValueChange={(value: string) =>
@@ -586,8 +626,8 @@ export function OrganizerShell() {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="compressed">Compressed</SelectItem>
-                    <SelectItem value="raw">Raw</SelectItem>
+                    <SelectItem value={COMPRESSION_MODE.COMPRESSED}>Standard</SelectItem>
+                    <SelectItem value={COMPRESSION_MODE.RAW}>Original Quality</SelectItem>
                   </SelectContent>
                 </Select>
               </div>

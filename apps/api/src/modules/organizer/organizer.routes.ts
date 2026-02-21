@@ -15,6 +15,7 @@ import {
   organizerDownloadSelected,
   organizerGetEvent,
   organizerGetGallery,
+  organizerGetGalleryFacets,
   organizerGetGalleryStats,
   organizerGetGuests,
   organizerGetSession,
@@ -42,6 +43,7 @@ organizerRouter.route('/events/:id').get(organizerGetEvent).patch(organizerPatch
 organizerRouter.post('/events/:id/close', organizerCloseEvent);
 organizerRouter.post('/events/:id/archive', organizerArchiveEvent);
 organizerRouter.get('/events/:id/gallery', organizerGetGallery);
+organizerRouter.get('/events/:id/gallery/facets', organizerGetGalleryFacets);
 organizerRouter.get('/events/:id/gallery/stats', organizerGetGalleryStats);
 organizerRouter.post('/events/:id/media/:mid/hide', organizerHideMedia);
 organizerRouter.post('/events/:id/media/:mid/unhide', organizerUnhideMedia);

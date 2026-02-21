@@ -1,8 +1,10 @@
 'use client';
 
-import { FormEvent, MouseEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { MouseEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  ArrowUpDown,
   Check,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   Download,
@@ -12,10 +14,14 @@ import {
   Image,
   Loader2,
   RefreshCw,
-  Search,
   X
 } from 'lucide-react';
-import { ApiClientError, type EventDetail, type GalleryItem } from '@poveventcam/api-client';
+import {
+  ApiClientError,
+  type EventDetail,
+  type GalleryFacetItem,
+  type GalleryItem
+} from '@poveventcam/api-client';
 
 import { organizerApi } from '../lib/organizer-api';
 import { createZipBlob } from '../lib/zip';
@@ -27,7 +33,17 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Checkbox } from '@/components/ui/checkbox';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle
+} from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 
 interface OrganizerGalleryShellProps {
   eventId: string;
@@ -41,6 +57,12 @@ interface DownloadProgressState {
 const PAGE_SIZE = 100;
 const INITIAL_PAGE_LOAD = 30;
 const DOWNLOAD_CONCURRENCY = 5;
+const FACET_QUERY_LIMIT = 500;
+const MAX_UPLOADER_FILTER_SELECTION = 50;
+type GalleryFileTypeFilter = 'all' | 'image' | 'video';
+type GallerySortBy = 'uploaded_at' | 'uploader' | 'tag';
+type GallerySortOrder = 'asc' | 'desc';
+type DownloadStatusFilter = 'all' | 'downloaded' | 'not_downloaded';
 
 function extractErrorMessage(error: unknown): string {
   if (error instanceof ApiClientError) {
@@ -99,6 +121,7 @@ export function OrganizerGalleryShell({ eventId }: OrganizerGalleryShellProps) {
   const { session, signOut } = useAuth();
   const aliveRef = useRef(true);
   const galleryRequestVersionRef = useRef(0);
+  const facetRequestVersionRef = useRef(0);
 
   const [eventDetail, setEventDetail] = useState<EventDetail | null>(null);
   const [eventError, setEventError] = useState<string | null>(null);
@@ -110,12 +133,31 @@ export function OrganizerGalleryShell({ eventId }: OrganizerGalleryShellProps) {
   const [isPageEagerLoading, setIsPageEagerLoading] = useState(false);
   const [galleryError, setGalleryError] = useState<string | null>(null);
 
-  const [filterUploaderInput, setFilterUploaderInput] = useState('');
-  const [filterTagsInput, setFilterTagsInput] = useState('');
-  const [activeFilterUploader, setActiveFilterUploader] = useState('');
-  const [activeFilterTags, setActiveFilterTags] = useState('');
+  const [filterFileTypeInput, setFilterFileTypeInput] = useState<GalleryFileTypeFilter>('all');
+  const [filterDownloadStatusInput, setFilterDownloadStatusInput] = useState<DownloadStatusFilter>('all');
+  const [uploaderFacetSearchInput, setUploaderFacetSearchInput] = useState('');
+  const [tagFacetSearchInput, setTagFacetSearchInput] = useState('');
+  const [isUploaderFacetDropdownOpen, setIsUploaderFacetDropdownOpen] = useState(false);
+  const [isTagFacetDropdownOpen, setIsTagFacetDropdownOpen] = useState(false);
+  const [selectedUploaderFilters, setSelectedUploaderFilters] = useState<string[]>([]);
+  const [selectedTagFilters, setSelectedTagFilters] = useState<string[]>([]);
+  const [uploaderFacetOptions, setUploaderFacetOptions] = useState<GalleryFacetItem[]>([]);
+  const [tagFacetOptions, setTagFacetOptions] = useState<GalleryFacetItem[]>([]);
+  const [isFacetsLoading, setIsFacetsLoading] = useState(false);
+  const [hasFacetCacheLoaded, setHasFacetCacheLoaded] = useState(false);
+  const [facetsError, setFacetsError] = useState<string | null>(null);
+  const [activeFilterUploaders, setActiveFilterUploaders] = useState<string[]>([]);
+  const [activeFilterTags, setActiveFilterTags] = useState<string[]>([]);
+  const [activeFilterFileType, setActiveFilterFileType] = useState<'image' | 'video' | ''>('');
+  const [activeFilterDownloadStatus, setActiveFilterDownloadStatus] = useState<DownloadStatusFilter>('all');
+  const [isFilterDialogOpen, setIsFilterDialogOpen] = useState(false);
 
-  const [showUndownloadedOnly, setShowUndownloadedOnly] = useState(false);
+  const [activeSortBy, setActiveSortBy] = useState<GallerySortBy>('uploaded_at');
+  const [activeSortOrder, setActiveSortOrder] = useState<GallerySortOrder>('desc');
+  const [sortByInput, setSortByInput] = useState<GallerySortBy>('uploaded_at');
+  const [sortOrderInput, setSortOrderInput] = useState<GallerySortOrder>('desc');
+  const [isSortMenuOpen, setIsSortMenuOpen] = useState(false);
+
   const [downloadedMediaIds, setDownloadedMediaIds] = useState<Set<string>>(new Set());
 
   const [selectedMediaIds, setSelectedMediaIds] = useState<Set<string>>(new Set());
@@ -130,6 +172,9 @@ export function OrganizerGalleryShell({ eventId }: OrganizerGalleryShellProps) {
 
   const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const longPressTriggeredRef = useRef(false);
+  const sortMenuRef = useRef<HTMLDivElement | null>(null);
+  const uploaderFacetDropdownRef = useRef<HTMLDivElement | null>(null);
+  const tagFacetDropdownRef = useRef<HTMLDivElement | null>(null);
 
   const heading = useMemo(() => {
     if (!eventDetail) return 'Image Gallery';
@@ -149,11 +194,14 @@ export function OrganizerGalleryShell({ eventId }: OrganizerGalleryShellProps) {
   }, [galleryTotalCount]);
 
   const visibleGalleryItems = useMemo(() => {
-    if (!showUndownloadedOnly) {
+    if (activeFilterDownloadStatus === 'all') {
       return galleryItems;
     }
+    if (activeFilterDownloadStatus === 'downloaded') {
+      return galleryItems.filter((item) => downloadedMediaIds.has(item.media_id));
+    }
     return galleryItems.filter((item) => !downloadedMediaIds.has(item.media_id));
-  }, [downloadedMediaIds, galleryItems, showUndownloadedOnly]);
+  }, [activeFilterDownloadStatus, downloadedMediaIds, galleryItems]);
 
   const previewItem = useMemo(() => {
     if (previewIndex === null || previewIndex < 0 || previewIndex >= visibleGalleryItems.length) {
@@ -172,7 +220,26 @@ export function OrganizerGalleryShell({ eventId }: OrganizerGalleryShellProps) {
   const allVisibleSelected =
     visibleGalleryItems.length > 0 && selectedVisibleCount === visibleGalleryItems.length;
   const hasSelection = selectedMediaIds.size > 0;
-  const hasActiveFilters = Boolean(activeFilterUploader || activeFilterTags || showUndownloadedOnly);
+  const hasActiveFilters = Boolean(
+    activeFilterUploaders.length > 0 ||
+    activeFilterTags.length > 0 ||
+    activeFilterFileType ||
+    activeFilterDownloadStatus !== 'all'
+  );
+  const filteredUploaderFacetOptions = useMemo(() => {
+    const search = uploaderFacetSearchInput.trim().toLowerCase();
+    if (!search) {
+      return uploaderFacetOptions;
+    }
+    return uploaderFacetOptions.filter((option) => option.value.toLowerCase().includes(search));
+  }, [uploaderFacetOptions, uploaderFacetSearchInput]);
+  const filteredTagFacetOptions = useMemo(() => {
+    const search = tagFacetSearchInput.trim().toLowerCase();
+    if (!search) {
+      return tagFacetOptions;
+    }
+    return tagFacetOptions.filter((option) => option.value.toLowerCase().includes(search));
+  }, [tagFacetOptions, tagFacetSearchInput]);
 
   useEffect(() => {
     aliveRef.current = true;
@@ -213,6 +280,84 @@ export function OrganizerGalleryShell({ eventId }: OrganizerGalleryShellProps) {
     };
   }, [previewIndex]);
 
+  useEffect(() => {
+    if (!isSortMenuOpen) return;
+
+    function handlePointerDown(event: globalThis.MouseEvent) {
+      if (!sortMenuRef.current) return;
+      const target = event.target as Node | null;
+      if (target && !sortMenuRef.current.contains(target)) {
+        setIsSortMenuOpen(false);
+      }
+    }
+
+    window.addEventListener('mousedown', handlePointerDown);
+    return () => window.removeEventListener('mousedown', handlePointerDown);
+  }, [isSortMenuOpen]);
+
+  useEffect(() => {
+    if (!isUploaderFacetDropdownOpen && !isTagFacetDropdownOpen) return;
+
+    function handlePointerDown(event: globalThis.MouseEvent) {
+      const target = event.target as Node | null;
+      if (!target) return;
+
+      if (
+        isUploaderFacetDropdownOpen &&
+        uploaderFacetDropdownRef.current &&
+        !uploaderFacetDropdownRef.current.contains(target)
+      ) {
+        setIsUploaderFacetDropdownOpen(false);
+      }
+
+      if (
+        isTagFacetDropdownOpen &&
+        tagFacetDropdownRef.current &&
+        !tagFacetDropdownRef.current.contains(target)
+      ) {
+        setIsTagFacetDropdownOpen(false);
+      }
+    }
+
+    window.addEventListener('mousedown', handlePointerDown);
+    return () => window.removeEventListener('mousedown', handlePointerDown);
+  }, [isTagFacetDropdownOpen, isUploaderFacetDropdownOpen]);
+
+  const loadGalleryFacets = useCallback(
+    async (params?: { uploaderQuery?: string; tagQuery?: string }) => {
+      const requestVersion = facetRequestVersionRef.current + 1;
+      facetRequestVersionRef.current = requestVersion;
+      setIsFacetsLoading(true);
+      setFacetsError(null);
+
+      try {
+        const response = await organizerApi.getGalleryFacets(eventId, {
+          limit: FACET_QUERY_LIMIT,
+          uploader_q: params?.uploaderQuery || undefined,
+          tag_q: params?.tagQuery || undefined
+        });
+
+        if (!aliveRef.current || requestVersion !== facetRequestVersionRef.current) {
+          return;
+        }
+
+        setUploaderFacetOptions(response.uploaders);
+        setTagFacetOptions(response.tags);
+        setHasFacetCacheLoaded(true);
+      } catch (nextError) {
+        if (!aliveRef.current || requestVersion !== facetRequestVersionRef.current) {
+          return;
+        }
+        setFacetsError(extractErrorMessage(nextError));
+      } finally {
+        if (requestVersion === facetRequestVersionRef.current) {
+          setIsFacetsLoading(false);
+        }
+      }
+    },
+    [eventId]
+  );
+
   const loadEvent = useCallback(async () => {
     setEventError(null);
     try {
@@ -239,9 +384,12 @@ export function OrganizerGalleryShell({ eventId }: OrganizerGalleryShellProps) {
         const response = await organizerApi.getGallery(eventId, {
           cursor: String(offset),
           limit: INITIAL_PAGE_LOAD,
-          sort: 'newest',
-          filter_uploader: activeFilterUploader || undefined,
-          filter_tag: activeFilterTags || undefined
+          sort: activeSortBy === 'uploaded_at' ? (activeSortOrder === 'asc' ? 'oldest' : 'newest') : undefined,
+          sort_by: activeSortBy,
+          sort_order: activeSortOrder,
+          filter_uploader: activeFilterUploaders.length > 0 ? activeFilterUploaders.join(',') : undefined,
+          filter_tag: activeFilterTags.length > 0 ? activeFilterTags.join(',') : undefined,
+          filter_file_type: activeFilterFileType || undefined
         });
 
         if (!aliveRef.current || requestVersion !== galleryRequestVersionRef.current) {
@@ -270,7 +418,7 @@ export function OrganizerGalleryShell({ eventId }: OrganizerGalleryShellProps) {
         }
       }
     },
-    [activeFilterTags, activeFilterUploader, eventId]
+    [activeFilterFileType, activeFilterTags, activeFilterUploaders, activeSortBy, activeSortOrder, eventId]
   );
 
   const loadRemainingForCurrentPage = useCallback(async (): Promise<GalleryItem[]> => {
@@ -292,9 +440,12 @@ export function OrganizerGalleryShell({ eventId }: OrganizerGalleryShellProps) {
       const response = await organizerApi.getGallery(eventId, {
         cursor: String(offset + galleryItems.length),
         limit: targetCount - galleryItems.length,
-        sort: 'newest',
-        filter_uploader: activeFilterUploader || undefined,
-        filter_tag: activeFilterTags || undefined
+        sort: activeSortBy === 'uploaded_at' ? (activeSortOrder === 'asc' ? 'oldest' : 'newest') : undefined,
+        sort_by: activeSortBy,
+        sort_order: activeSortOrder,
+        filter_uploader: activeFilterUploaders.length > 0 ? activeFilterUploaders.join(',') : undefined,
+        filter_tag: activeFilterTags.length > 0 ? activeFilterTags.join(',') : undefined,
+        filter_file_type: activeFilterFileType || undefined
       });
 
       if (!aliveRef.current || currentRequestVersion !== galleryRequestVersionRef.current) {
@@ -321,8 +472,11 @@ export function OrganizerGalleryShell({ eventId }: OrganizerGalleryShellProps) {
       }
     }
   }, [
+    activeFilterFileType,
     activeFilterTags,
-    activeFilterUploader,
+    activeFilterUploaders,
+    activeSortBy,
+    activeSortOrder,
     eventId,
     galleryItems,
     galleryPage,
@@ -338,6 +492,13 @@ export function OrganizerGalleryShell({ eventId }: OrganizerGalleryShellProps) {
   useEffect(() => {
     void loadGalleryPage(galleryPage);
   }, [galleryPage, loadGalleryPage]);
+
+  useEffect(() => {
+    if (!isFilterDialogOpen || hasFacetCacheLoaded || isFacetsLoading) {
+      return;
+    }
+    void loadGalleryFacets();
+  }, [hasFacetCacheLoaded, isFacetsLoading, isFilterDialogOpen, loadGalleryFacets]);
 
   useEffect(() => {
     if (isGalleryLoading || isPageEagerLoading) return;
@@ -363,26 +524,87 @@ export function OrganizerGalleryShell({ eventId }: OrganizerGalleryShellProps) {
     loadRemainingForCurrentPage
   ]);
 
-  function handleApplyFilters(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setActiveFilterUploader(filterUploaderInput.trim());
-    setActiveFilterTags(
-      filterTagsInput
-        .split(',')
-        .map((tag) => tag.trim().toLowerCase())
-        .filter(Boolean)
-        .join(',')
-    );
+  function handleApplyFilters() {
+    setActiveFilterUploaders(selectedUploaderFilters);
+    setActiveFilterTags(selectedTagFilters);
+    setActiveFilterFileType(filterFileTypeInput === 'all' ? '' : filterFileTypeInput);
+    setActiveFilterDownloadStatus(filterDownloadStatusInput);
+    setSelectedMediaIds(new Set());
+    setPreviewIndex(null);
+    setIsUploaderFacetDropdownOpen(false);
+    setIsTagFacetDropdownOpen(false);
+    setIsFilterDialogOpen(false);
     setGalleryPage(0);
   }
 
   function handleResetFilters() {
-    setFilterUploaderInput('');
-    setFilterTagsInput('');
-    setActiveFilterUploader('');
-    setActiveFilterTags('');
-    setShowUndownloadedOnly(false);
+    setFilterFileTypeInput('all');
+    setFilterDownloadStatusInput('all');
+    setUploaderFacetSearchInput('');
+    setTagFacetSearchInput('');
+    setSelectedUploaderFilters([]);
+    setSelectedTagFilters([]);
+    setActiveFilterUploaders([]);
+    setActiveFilterTags([]);
+    setActiveFilterFileType('');
+    setActiveFilterDownloadStatus('all');
+    setSelectedMediaIds(new Set());
+    setPreviewIndex(null);
+    setIsUploaderFacetDropdownOpen(false);
+    setIsTagFacetDropdownOpen(false);
+    setIsFilterDialogOpen(false);
     setGalleryPage(0);
+  }
+
+  function toggleSelectedUploaderFilter(name: string) {
+    const normalized = name.trim();
+    if (!normalized) return;
+
+    setSelectedUploaderFilters((current) => {
+      const exists = current.some((value) => value.toLowerCase() === normalized.toLowerCase());
+      if (exists) {
+        return current.filter((value) => value.toLowerCase() !== normalized.toLowerCase());
+      }
+      if (current.length >= MAX_UPLOADER_FILTER_SELECTION) {
+        return current;
+      }
+      return [...current, normalized];
+    });
+  }
+
+  function toggleSelectedTagFilter(tag: string) {
+    setSelectedTagFilters((current) => {
+      if (current.includes(tag)) {
+        return current.filter((value) => value !== tag);
+      }
+      return [...current, tag];
+    });
+  }
+
+  function handleSortChange() {
+    setActiveSortBy(sortByInput);
+    setActiveSortOrder(sortOrderInput);
+    setIsSortMenuOpen(false);
+    setGalleryPage(0);
+  }
+
+  function invalidateFacetCache() {
+    setHasFacetCacheLoaded(false);
+    setFacetsError(null);
+    setUploaderFacetOptions([]);
+    setTagFacetOptions([]);
+    setUploaderFacetSearchInput('');
+    setTagFacetSearchInput('');
+    setIsUploaderFacetDropdownOpen(false);
+    setIsTagFacetDropdownOpen(false);
+  }
+
+  function handleRefreshGallery() {
+    invalidateFacetCache();
+    void loadGalleryPage(galleryPage);
+    if (isFilterDialogOpen) {
+      void loadGalleryFacets();
+    }
   }
 
   function toggleSelectMedia(mediaId: string) {
@@ -408,9 +630,12 @@ export function OrganizerGalleryShell({ eventId }: OrganizerGalleryShellProps) {
         ? await loadRemainingForCurrentPage()
         : galleryItems;
 
-    const selectableItems = showUndownloadedOnly
-      ? loadedItems.filter((item) => !downloadedMediaIds.has(item.media_id))
-      : loadedItems;
+    const selectableItems =
+      activeFilterDownloadStatus === 'all'
+        ? loadedItems
+        : activeFilterDownloadStatus === 'downloaded'
+          ? loadedItems.filter((item) => downloadedMediaIds.has(item.media_id))
+          : loadedItems.filter((item) => !downloadedMediaIds.has(item.media_id));
     setSelectedMediaIds(new Set(selectableItems.map((item) => item.media_id)));
   }
 
@@ -592,12 +817,6 @@ export function OrganizerGalleryShell({ eventId }: OrganizerGalleryShellProps) {
     setPreviewIndex(index);
   }
 
-  function handleUndownloadedToggle(checked: boolean | 'indeterminate') {
-    setShowUndownloadedOnly(Boolean(checked));
-    setSelectedMediaIds(new Set());
-    setPreviewIndex(null);
-  }
-
   return (
     <main className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100">
       <OrganizerHeader
@@ -616,7 +835,7 @@ export function OrganizerGalleryShell({ eventId }: OrganizerGalleryShellProps) {
           </Alert>
         )}
 
-        <Card>
+        <Card className="mb-2">
           <CardHeader className="pb-4">
             <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
               <div>
@@ -629,120 +848,408 @@ export function OrganizerGalleryShell({ eventId }: OrganizerGalleryShellProps) {
                 </CardDescription>
               </div>
               <div className="flex flex-wrap gap-2">
-                {hasSelection && (
-                  <>
-                    <Button onClick={() => void handleDownloadSelected()} disabled={isBatchDownloading}>
-                      {isBatchDownloading ? (
-                        <Loader2 className="h-4 w-4 animate-spin" />
-                      ) : (
-                        <Download className="h-4 w-4" />
-                      )}
-                      Download Selected ({selectedMediaIds.size})
-                    </Button>
-                    <Button variant="ghost" size="sm" onClick={clearSelection}>
-                      <X className="h-4 w-4" />
-                      Clear
-                    </Button>
-                  </>
-                )}
-                <Button variant="outline" onClick={() => void loadGalleryPage(galleryPage)} disabled={isGalleryLoading}>
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="min-w-28"
+                  onClick={() => {
+                    setSelectedTagFilters(activeFilterTags);
+                    setSelectedUploaderFilters(activeFilterUploaders);
+                    setFilterDownloadStatusInput(activeFilterDownloadStatus);
+                    setFilterFileTypeInput(activeFilterFileType || 'all');
+                    setUploaderFacetSearchInput('');
+                    setTagFacetSearchInput('');
+                    setIsFilterDialogOpen(true);
+                  }}
+                >
+                  <Filter className="h-4 w-4" />
+                  Filter
+                </Button>
+
+                <div ref={sortMenuRef} className="relative">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="min-w-28"
+                    onClick={() => {
+                      setSortByInput(activeSortBy);
+                      setSortOrderInput(activeSortOrder);
+                      setIsSortMenuOpen((current) => !current);
+                    }}
+                  >
+                    <ArrowUpDown className="h-4 w-4" />
+                    Sort
+                  </Button>
+                  {isSortMenuOpen && (
+                    <div className="absolute right-0 top-[calc(100%+0.5rem)] z-30 w-72 rounded-lg border bg-popover p-3 shadow-md">
+                      <div className="space-y-3">
+                        <div className="space-y-1">
+                          <Label htmlFor="sort-by">Sort by</Label>
+                          <Select
+                            value={sortByInput}
+                            onValueChange={(value: string) => setSortByInput(value as GallerySortBy)}
+                          >
+                            <SelectTrigger id="sort-by">
+                              <SelectValue placeholder="Sort by" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="uploaded_at">Uploaded date</SelectItem>
+                              <SelectItem value="uploader">Guest name</SelectItem>
+                              <SelectItem value="tag">Tag</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+                        <div className="space-y-1">
+                          <Label htmlFor="sort-direction">Order</Label>
+                          <Select
+                            value={sortOrderInput}
+                            onValueChange={(value: string) => setSortOrderInput(value as GallerySortOrder)}
+                          >
+                            <SelectTrigger id="sort-direction">
+                              <SelectValue placeholder="Order" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="desc">Descending</SelectItem>
+                              <SelectItem value="asc">Ascending</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+                        <div className="grid grid-cols-2 gap-2 pt-1">
+                          <Button type="button" variant="outline" size="sm" onClick={() => setIsSortMenuOpen(false)}>
+                            Cancel
+                          </Button>
+                          <Button type="button" size="sm" onClick={handleSortChange}>
+                            Apply
+                          </Button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <Button
+                  variant="outline"
+                  onClick={handleRefreshGallery}
+                  disabled={isGalleryLoading}
+                >
                   <RefreshCw className={`h-4 w-4 ${isGalleryLoading ? 'animate-spin' : ''}`} />
                 </Button>
               </div>
             </div>
           </CardHeader>
 
-          <CardContent className="space-y-4">
-            <form onSubmit={handleApplyFilters} className="flex flex-wrap items-end gap-3">
-              <div className="min-w-[200px] flex-1">
-                <label className="mb-1.5 block text-sm font-medium text-muted-foreground">
-                  Filter by uploader
-                </label>
-                <div className="relative">
-                  <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                  <Input
-                    type="text"
-                    placeholder="Name..."
-                    value={filterUploaderInput}
-                    onChange={(next) => setFilterUploaderInput(next.target.value)}
-                    className="pl-9"
-                  />
-                </div>
-              </div>
-              <div className="min-w-[200px] flex-1">
-                <label className="mb-1.5 block text-sm font-medium text-muted-foreground">
-                  Filter by tags
-                </label>
-                <Input
-                  type="text"
-                  placeholder="Tags (comma separated)"
-                  value={filterTagsInput}
-                  onChange={(next) => setFilterTagsInput(next.target.value)}
+        </Card>
+
+        <div className="space-y-2">
+          <div className="flex flex-wrap items-center gap-2">
+            {activeFilterUploaders.slice(0, 3).map((uploader) => (
+              <Badge key={uploader} variant="secondary">
+                Uploader: {uploader}
+              </Badge>
+            ))}
+            {activeFilterUploaders.length > 3 && (
+              <Badge variant="outline">+{activeFilterUploaders.length - 3} more uploaders</Badge>
+            )}
+            {activeFilterTags.slice(0, 3).map((tag) => (
+              <Badge key={tag} variant="secondary">
+                Tag: {tag}
+              </Badge>
+            ))}
+            {activeFilterTags.length > 3 && (
+              <Badge variant="outline">+{activeFilterTags.length - 3} more tags</Badge>
+            )}
+            {activeFilterFileType && <Badge variant="secondary">Type: {activeFilterFileType}</Badge>}
+            {activeFilterDownloadStatus !== 'all' && (
+              <Badge variant="secondary">
+                Download Status: {activeFilterDownloadStatus === 'downloaded' ? 'Downloaded' : 'Not Downloaded'}
+              </Badge>
+            )}
+            <Badge variant="outline">
+              Sort: {activeSortBy === 'uploaded_at' ? 'Uploaded date' : activeSortBy === 'uploader' ? 'Guest name' : 'Tag'}{' '}
+              ({activeSortOrder === 'asc' ? 'asc' : 'desc'})
+            </Badge>
+          </div>
+
+          {downloadProgress && (
+            <div className="space-y-2">
+              <p className="text-sm text-muted-foreground">
+                Downloading {downloadProgress.completed}/{downloadProgress.total}...
+              </p>
+              <div className="h-2 w-full rounded-full bg-muted">
+                <div
+                  className="h-2 rounded-full bg-primary transition-all"
+                  style={{
+                    width: `${Math.max(
+                      4,
+                      Math.round((downloadProgress.completed / Math.max(downloadProgress.total, 1)) * 100)
+                    )}%`
+                  }}
                 />
               </div>
-              <div className="flex gap-2">
-                <Button type="submit" size="sm">
-                  <Filter className="h-4 w-4" />
-                  Apply
-                </Button>
-                {hasActiveFilters && (
-                  <Button type="button" size="sm" variant="outline" onClick={handleResetFilters}>
-                    <X className="h-4 w-4" />
-                    Clear
+            </div>
+          )}
+
+          {downloadMessage && (
+            <Alert variant="info">
+              <AlertDescription>{downloadMessage}</AlertDescription>
+            </Alert>
+          )}
+          {downloadError && (
+            <Alert variant="destructive">
+              <AlertDescription>{downloadError}</AlertDescription>
+            </Alert>
+          )}
+        </div>
+
+        <Dialog
+          open={isFilterDialogOpen}
+          onOpenChange={(open: boolean) => {
+            setIsFilterDialogOpen(open);
+            if (!open) {
+              setIsUploaderFacetDropdownOpen(false);
+              setIsTagFacetDropdownOpen(false);
+            }
+          }}
+        >
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Filter gallery</DialogTitle>
+              <DialogDescription>
+                Filter by tags, guest name, file type, and download status.
+              </DialogDescription>
+            </DialogHeader>
+
+            <div className="space-y-4">
+              <div className="space-y-1">
+                <Label>Guest name</Label>
+                <div className="relative" ref={uploaderFacetDropdownRef}>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="w-full justify-between"
+                    onClick={() => {
+                      setIsUploaderFacetDropdownOpen((current) => {
+                        const next = !current;
+                        if (next) {
+                          setIsTagFacetDropdownOpen(false);
+                        }
+                        return next;
+                      });
+                    }}
+                  >
+                    <span className="truncate">
+                      {selectedUploaderFilters.length > 0
+                        ? `(${selectedUploaderFilters.length}/${MAX_UPLOADER_FILTER_SELECTION} selected)`
+                        : 'Select guest names'}
+                    </span>
+                    <ChevronDown
+                      className={`h-4 w-4 text-muted-foreground transition-transform ${isUploaderFacetDropdownOpen ? 'rotate-180' : ''}`}
+                    />
                   </Button>
+
+                  {isUploaderFacetDropdownOpen && (
+                    <div className="absolute left-0 right-0 top-full z-50 mt-1 space-y-2 rounded-md border bg-background p-2 shadow-md">
+                      <Input
+                        id="filter-uploader-search"
+                        type="text"
+                        placeholder="Search guest names..."
+                        value={uploaderFacetSearchInput}
+                        onChange={(next) => setUploaderFacetSearchInput(next.target.value)}
+                      />
+                      <div className="max-h-44 space-y-1 overflow-y-auto">
+                        {isFacetsLoading && filteredUploaderFacetOptions.length === 0 ? (
+                          <p className="text-sm text-muted-foreground">Loading guest options...</p>
+                        ) : filteredUploaderFacetOptions.length > 0 ? (
+                          filteredUploaderFacetOptions.map((option) => {
+                            const isSelected = selectedUploaderFilters.some(
+                              (value) => value.toLowerCase() === option.value.toLowerCase()
+                            );
+                            const disableNewSelection =
+                              !isSelected &&
+                              selectedUploaderFilters.length >= MAX_UPLOADER_FILTER_SELECTION;
+                            return (
+                              <button
+                                key={option.value}
+                                type="button"
+                                className={`flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent ${isSelected ? 'bg-accent' : ''} ${disableNewSelection ? 'cursor-not-allowed opacity-50 hover:bg-transparent' : ''}`}
+                                onClick={() => toggleSelectedUploaderFilter(option.value)}
+                                disabled={disableNewSelection}
+                              >
+                                <span className="mr-2 flex h-4 w-4 items-center justify-center">
+                                  {isSelected ? <Check className="h-4 w-4 text-primary" /> : null}
+                                </span>
+                                <span className="flex-1 truncate">{option.value}</span>
+                                <span className="ml-2 text-xs text-muted-foreground">{option.count}</span>
+                              </button>
+                            );
+                          })
+                        ) : (
+                          <p className="text-sm text-muted-foreground">No matching guest names found.</p>
+                        )}
+                      </div>
+                      <p className="text-xs text-muted-foreground">
+                        ({selectedUploaderFilters.length}/{MAX_UPLOADER_FILTER_SELECTION} selected)
+                      </p>
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  {selectedUploaderFilters.length > 0 ? (
+                    selectedUploaderFilters.map((name) => (
+                      <Badge key={name} variant="secondary" className="gap-1">
+                        {name}
+                        <button
+                          type="button"
+                          className="rounded-sm p-0.5 hover:bg-black/10"
+                          onClick={() => toggleSelectedUploaderFilter(name)}
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
+                      </Badge>
+                    ))
+                  ) : (
+                    <p className="text-sm text-muted-foreground">No guest selected.</p>
+                  )}
+                </div>
+
+                {facetsError && (
+                  <p className="text-xs text-destructive">{facetsError}</p>
                 )}
               </div>
-            </form>
 
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <div className="flex flex-wrap items-center gap-2">
-                {activeFilterUploader && <Badge variant="secondary">Uploader: {activeFilterUploader}</Badge>}
-                {activeFilterTags && <Badge variant="secondary">Tags: {activeFilterTags}</Badge>}
-                {showUndownloadedOnly && <Badge variant="secondary">Not Yet Downloaded</Badge>}
-                <label className="ml-2 inline-flex items-center gap-2 text-sm text-muted-foreground">
-                  <Checkbox checked={showUndownloadedOnly} onCheckedChange={handleUndownloadedToggle} />
-                  Show not yet downloaded
-                </label>
+              <div className="space-y-1">
+                <Label>Tags</Label>
+                <div className="relative" ref={tagFacetDropdownRef}>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="w-full justify-between"
+                    onClick={() => {
+                      setIsTagFacetDropdownOpen((current) => {
+                        const next = !current;
+                        if (next) {
+                          setIsUploaderFacetDropdownOpen(false);
+                        }
+                        return next;
+                      });
+                    }}
+                  >
+                    <span className="truncate">
+                      {selectedTagFilters.length > 0
+                        ? `${selectedTagFilters.length} tag${selectedTagFilters.length > 1 ? 's' : ''} selected`
+                        : 'Select tags'}
+                    </span>
+                    <ChevronDown
+                      className={`h-4 w-4 text-muted-foreground transition-transform ${isTagFacetDropdownOpen ? 'rotate-180' : ''}`}
+                    />
+                  </Button>
+
+                  {isTagFacetDropdownOpen && (
+                    <div className="absolute left-0 right-0 top-full z-50 mt-1 space-y-2 rounded-md border bg-background p-2 shadow-md">
+                    <Input
+                      id="filter-tag-search"
+                      type="text"
+                      placeholder="Search tags..."
+                      value={tagFacetSearchInput}
+                      onChange={(next) => setTagFacetSearchInput(next.target.value)}
+                    />
+                    <div className="max-h-44 space-y-1 overflow-y-auto">
+                        {isFacetsLoading && filteredTagFacetOptions.length === 0 ? (
+                          <p className="text-sm text-muted-foreground">Loading tag options...</p>
+                        ) : filteredTagFacetOptions.length > 0 ? (
+                          filteredTagFacetOptions.map((option) => {
+                            const isSelected = selectedTagFilters.includes(option.value);
+                            return (
+                              <button
+                                key={option.value}
+                                type="button"
+                                className={`flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent ${isSelected ? 'bg-accent' : ''}`}
+                                onClick={() => toggleSelectedTagFilter(option.value)}
+                              >
+                                <span className="mr-2 flex h-4 w-4 items-center justify-center">
+                                  {isSelected ? <Check className="h-4 w-4 text-primary" /> : null}
+                                </span>
+                                <span className="flex-1 truncate">{option.value}</span>
+                                <span className="ml-2 text-xs text-muted-foreground">{option.count}</span>
+                              </button>
+                            );
+                          })
+                        ) : (
+                          <p className="text-sm text-muted-foreground">No matching tags found.</p>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex flex-wrap gap-1">
+                  {selectedTagFilters.length > 0 ? (
+                    selectedTagFilters.map((tag) => (
+                      <Badge key={tag} variant="secondary" className="gap-1">
+                        {tag}
+                        <button
+                          type="button"
+                          className="rounded-sm p-0.5 hover:bg-black/10"
+                          onClick={() => toggleSelectedTagFilter(tag)}
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
+                      </Badge>
+                    ))
+                  ) : (
+                    <p className="text-sm text-muted-foreground">No tags selected.</p>
+                  )}
+                </div>
+
+                {facetsError && (
+                  <p className="text-xs text-destructive">{facetsError}</p>
+                )}
               </div>
-              {visibleGalleryItems.length > 0 && (
-                <Button variant="ghost" size="sm" onClick={() => void toggleSelectAllCurrentPage()}>
-                  <Check className="h-4 w-4" />
-                  {allVisibleSelected ? 'Deselect All' : 'Select All'}
-                </Button>
-              )}
+
+              <div className="space-y-1">
+                <Label htmlFor="filter-file-type">File type</Label>
+                <Select
+                  value={filterFileTypeInput}
+                  onValueChange={(value: string) => setFilterFileTypeInput(value as GalleryFileTypeFilter)}
+                >
+                  <SelectTrigger id="filter-file-type">
+                    <SelectValue placeholder="Select type" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">All</SelectItem>
+                    <SelectItem value="image">Image</SelectItem>
+                    <SelectItem value="video">Video</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div className="space-y-1">
+                <Label htmlFor="filter-download-status">Download Status</Label>
+                <Select
+                  value={filterDownloadStatusInput}
+                  onValueChange={(value: string) => setFilterDownloadStatusInput(value as DownloadStatusFilter)}
+                >
+                  <SelectTrigger id="filter-download-status">
+                    <SelectValue placeholder="Select download status" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">Show All</SelectItem>
+                    <SelectItem value="downloaded">Downloaded</SelectItem>
+                    <SelectItem value="not_downloaded">Not Downloaded</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
             </div>
 
-            {downloadProgress && (
-              <div className="space-y-2">
-                <p className="text-sm text-muted-foreground">
-                  Downloading {downloadProgress.completed}/{downloadProgress.total}...
-                </p>
-                <div className="h-2 w-full rounded-full bg-muted">
-                  <div
-                    className="h-2 rounded-full bg-primary transition-all"
-                    style={{
-                      width: `${Math.max(
-                        4,
-                        Math.round((downloadProgress.completed / Math.max(downloadProgress.total, 1)) * 100)
-                      )}%`
-                    }}
-                  />
-                </div>
-              </div>
-            )}
-
-            {downloadMessage && (
-              <Alert variant="info">
-                <AlertDescription>{downloadMessage}</AlertDescription>
-              </Alert>
-            )}
-            {downloadError && (
-              <Alert variant="destructive">
-                <AlertDescription>{downloadError}</AlertDescription>
-              </Alert>
-            )}
-          </CardContent>
-        </Card>
+            <DialogFooter>
+              <Button variant="outline" onClick={handleResetFilters}>
+                Clear filters
+              </Button>
+              <Button onClick={handleApplyFilters}>Apply filters</Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
 
         {galleryError && (
           <Alert variant="destructive">
@@ -758,9 +1265,9 @@ export function OrganizerGalleryShell({ eventId }: OrganizerGalleryShellProps) {
           <Card>
             <CardContent className="py-12 text-center">
               <Image className="mx-auto h-12 w-12 text-muted-foreground/50" />
-              {showUndownloadedOnly && galleryItems.length > 0 ? (
+              {activeFilterDownloadStatus !== 'all' && galleryItems.length > 0 ? (
                 <p className="mt-4 text-muted-foreground">
-                  All images on this page are currently marked as downloaded.
+                  No images match the selected download status on this page.
                 </p>
               ) : (
                 <p className="mt-4 text-muted-foreground">
@@ -771,6 +1278,37 @@ export function OrganizerGalleryShell({ eventId }: OrganizerGalleryShellProps) {
           </Card>
         ) : (
           <>
+            <div className="flex flex-wrap items-center justify-between gap-1">
+              <div className="flex flex-wrap gap-1">
+                {hasSelection && (
+                  <>
+                    <Button
+                      size="sm"
+                      onClick={() => void handleDownloadSelected()}
+                      disabled={isBatchDownloading}
+                    >
+                      {isBatchDownloading ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <Download className="h-4 w-4" />
+                      )}
+                      Download Selected ({selectedMediaIds.size})
+                    </Button>
+                    <Button className="" variant="ghost" size="sm" onClick={clearSelection}>
+                      <X className="h-4 w-4" />
+                      Clear
+                    </Button>
+                  </>
+                )}
+              </div>
+              {visibleGalleryItems.length > 0 && (
+                <Button variant="ghost" size="sm" onClick={() => void toggleSelectAllCurrentPage()}>
+                  <Check className="h-4 w-4" />
+                  {allVisibleSelected ? 'Deselect All' : 'Select All'}
+                </Button>
+              )}
+            </div>
+
             <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
               {visibleGalleryItems.map((item, index) => {
                 const isSelected = selectedMediaIds.has(item.media_id);
@@ -821,13 +1359,13 @@ export function OrganizerGalleryShell({ eventId }: OrganizerGalleryShellProps) {
                         />
                       </div>
 
-                      <button
+                      {/* <button
                         className="absolute right-2 top-2 rounded-full bg-black/50 p-1.5 text-white opacity-0 transition-opacity hover:bg-black/70 active:bg-black/80 group-hover:opacity-100"
                         onClick={(event) => handlePreviewClick(event, index)}
                         onTouchStart={(event) => event.stopPropagation()}
                       >
                         <Eye className="h-4 w-4" />
-                      </button>
+                      </button> */}
                     </div>
                     <CardContent className="p-3">
                       <p className="truncate text-sm font-medium">{item.uploaded_by || 'Unknown'}</p>

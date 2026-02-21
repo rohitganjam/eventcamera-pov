@@ -332,6 +332,15 @@ Use DB transactions for:
 
 Avoid long transactions around external calls. Persist intent first, then execute external side effect.
 
+### 12.3 Gallery Facet Tables
+
+Organizer gallery filter options (uploader/tag) are served from precomputed facet tables:
+
+- `event_uploader_facets`
+- `event_tag_facets`
+
+Write-path updates happen during upload completion and cleanup transitions, while the daily `data-cleanup` job performs reconciliation to correct drift. This keeps organizer filter-option reads fast and decoupled from raw `media` scans.
+
 ---
 
 ## 13. Storage Interaction Contract

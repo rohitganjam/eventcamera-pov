@@ -490,6 +490,7 @@ paths:
     get:
       tags: [OrganizerMedia]
       summary: Get paginated media gallery for event
+      description: "Filter semantics: within multi-value filters (`filter_uploader`, `filter_tag`) matching is OR; across filter groups matching is AND."
       operationId: organizerGetGallery
       security:
         - OrganizerSessionCookie: []
@@ -499,10 +500,13 @@ paths:
         - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/Limit'
         - $ref: '#/components/parameters/Sort'
+        - $ref: '#/components/parameters/SortBy'
+        - $ref: '#/components/parameters/SortOrder'
         - $ref: '#/components/parameters/FilterDate'
         - $ref: '#/components/parameters/FilterSession'
         - $ref: '#/components/parameters/FilterUploader'
         - $ref: '#/components/parameters/FilterTag'
+        - $ref: '#/components/parameters/FilterFileType'
       responses:
         '200':
           description: Gallery page
@@ -510,6 +514,37 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/GalleryResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/organizer/events/{id}/gallery/facets:
+    get:
+      tags: [OrganizerMedia]
+      summary: Get searchable uploader/tag facet options for event gallery filters
+      operationId: organizerGetGalleryFacets
+      security:
+        - OrganizerSessionCookie: []
+        - OrganizerBearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/EventId'
+        - $ref: '#/components/parameters/FacetLimit'
+        - $ref: '#/components/parameters/UploaderQuery'
+        - $ref: '#/components/parameters/TagQuery'
+      responses:
+        '200':
+          description: Facet options
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GalleryFacetsResponse'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -951,7 +986,7 @@ paths:
   /api/internal/data-cleanup:
     post:
       tags: [Internal]
-      summary: Trigger daily data cleanup (media retention + session cleanup)
+      summary: Trigger daily data cleanup (media retention + session cleanup + facet sync)
       operationId: internalDataCleanup
       security:
         - InternalCronBearerAuth: []
@@ -1073,14 +1108,41 @@ components:
         minimum: 1
         maximum: 200
         default: 50
+    FacetLimit:
+      name: limit
+      in: query
+      required: false
+      description: Max number of facet options to return per facet type.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 500
+        default: 500
     Sort:
       name: sort
       in: query
       required: false
+      description: Legacy date sort parameter. Prefer `sort_by` + `sort_order`.
       schema:
         type: string
         enum: [newest, oldest]
         default: newest
+    SortBy:
+      name: sort_by
+      in: query
+      required: false
+      schema:
+        type: string
+        enum: [uploaded_at, uploader, tag]
+        default: uploaded_at
+    SortOrder:
+      name: sort_order
+      in: query
+      required: false
+      schema:
+        type: string
+        enum: [asc, desc]
+        default: desc
     FilterDate:
       name: filter_date
       in: query
@@ -1099,14 +1161,35 @@ components:
       name: filter_uploader
       in: query
       required: false
+      description: Comma-separated uploader names. Matches media uploaded by any of the provided names (OR).
       schema:
         type: string
     FilterTag:
       name: filter_tag
       in: query
       required: false
+      description: Comma-separated tags. Matches media containing any of the provided tags (OR).
       schema:
         type: string
+    UploaderQuery:
+      name: uploader_q
+      in: query
+      required: false
+      schema:
+        type: string
+    TagQuery:
+      name: tag_q
+      in: query
+      required: false
+      schema:
+        type: string
+    FilterFileType:
+      name: filter_file_type
+      in: query
+      required: false
+      schema:
+        type: string
+        enum: [image, video]
     IdempotencyKey:
       name: Idempotency-Key
       in: header
@@ -1704,6 +1787,51 @@ components:
         total_count:
           type: integer
           minimum: 0
+
+    GalleryFacetItem:
+      type: object
+      required: [value, count]
+      properties:
+        value:
+          type: string
+        count:
+          type: integer
+          minimum: 0
+
+    GalleryFileTypeFacetItem:
+      type: object
+      required: [value, count]
+      properties:
+        value:
+          type: string
+          enum: [image, video]
+        count:
+          type: integer
+          minimum: 0
+
+    GalleryFacetsResponse:
+      type: object
+      required: [uploaders, tags, file_types, generated_at, limit]
+      properties:
+        uploaders:
+          type: array
+          items:
+            $ref: '#/components/schemas/GalleryFacetItem'
+        tags:
+          type: array
+          items:
+            $ref: '#/components/schemas/GalleryFacetItem'
+        file_types:
+          type: array
+          items:
+            $ref: '#/components/schemas/GalleryFileTypeFacetItem'
+        generated_at:
+          type: string
+          format: date-time
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 500
 
     UploadsPerDayItem:
       type: object

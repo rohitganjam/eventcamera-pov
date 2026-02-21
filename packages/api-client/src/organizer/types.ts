@@ -1,7 +1,11 @@
 import type { QueryParams } from '../core/http';
 
 export type UUID = string;
-export type CompressionMode = 'compressed' | 'raw';
+export const COMPRESSION_MODE = {
+  COMPRESSED: 'compressed',
+  RAW: 'raw'
+} as const;
+export type CompressionMode = (typeof COMPRESSION_MODE)[keyof typeof COMPRESSION_MODE];
 export type EventStatus = 'draft' | 'active' | 'closed' | 'archived' | 'purged';
 export type CurrencyCode = string;
 
@@ -94,10 +98,40 @@ export interface GalleryQuery extends QueryParams {
   cursor?: string;
   limit?: number;
   sort?: 'newest' | 'oldest';
+  sort_by?: 'uploaded_at' | 'uploader' | 'tag';
+  sort_order?: 'asc' | 'desc';
   filter_date?: string;
   filter_session?: UUID;
+  // Comma-separated uploader names; API matches if any selected uploader matches (OR).
   filter_uploader?: string;
+  // Comma-separated tags; API matches if any selected tag matches (OR).
   filter_tag?: string;
+  // Filter groups (uploader/tag/file_type/date/session) are combined with AND.
+  filter_file_type?: 'image' | 'video';
+}
+
+export interface GalleryFacetsQuery extends QueryParams {
+  uploader_q?: string;
+  tag_q?: string;
+  limit?: number;
+}
+
+export interface GalleryFacetItem {
+  value: string;
+  count: number;
+}
+
+export interface GalleryFileTypeFacetItem {
+  value: 'image' | 'video';
+  count: number;
+}
+
+export interface GalleryFacetsResponse {
+  uploaders: GalleryFacetItem[];
+  tags: GalleryFacetItem[];
+  file_types: GalleryFileTypeFacetItem[];
+  generated_at: string;
+  limit: number;
 }
 
 export interface GalleryItem {

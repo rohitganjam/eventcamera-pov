@@ -847,7 +847,7 @@ export function OrganizerGalleryShell({ eventId }: OrganizerGalleryShellProps) {
                   {galleryTotalCount} image(s) • Page {galleryPage + 1} of {pageCount}
                 </CardDescription>
               </div>
-              <div className="flex flex-wrap gap-2">
+              <div ref={sortMenuRef} className="relative flex w-full flex-wrap gap-2 sm:w-auto">
                 <Button
                   type="button"
                   variant="outline"
@@ -866,66 +866,19 @@ export function OrganizerGalleryShell({ eventId }: OrganizerGalleryShellProps) {
                   Filter
                 </Button>
 
-                <div ref={sortMenuRef} className="relative">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    className="min-w-28"
-                    onClick={() => {
-                      setSortByInput(activeSortBy);
-                      setSortOrderInput(activeSortOrder);
-                      setIsSortMenuOpen((current) => !current);
-                    }}
-                  >
-                    <ArrowUpDown className="h-4 w-4" />
-                    Sort
-                  </Button>
-                  {isSortMenuOpen && (
-                    <div className="absolute right-0 top-[calc(100%+0.5rem)] z-30 w-72 rounded-lg border bg-popover p-3 shadow-md">
-                      <div className="space-y-3">
-                        <div className="space-y-1">
-                          <Label htmlFor="sort-by">Sort by</Label>
-                          <Select
-                            value={sortByInput}
-                            onValueChange={(value: string) => setSortByInput(value as GallerySortBy)}
-                          >
-                            <SelectTrigger id="sort-by">
-                              <SelectValue placeholder="Sort by" />
-                            </SelectTrigger>
-                            <SelectContent>
-                              <SelectItem value="uploaded_at">Uploaded date</SelectItem>
-                              <SelectItem value="uploader">Guest name</SelectItem>
-                              <SelectItem value="tag">Tag</SelectItem>
-                            </SelectContent>
-                          </Select>
-                        </div>
-                        <div className="space-y-1">
-                          <Label htmlFor="sort-direction">Order</Label>
-                          <Select
-                            value={sortOrderInput}
-                            onValueChange={(value: string) => setSortOrderInput(value as GallerySortOrder)}
-                          >
-                            <SelectTrigger id="sort-direction">
-                              <SelectValue placeholder="Order" />
-                            </SelectTrigger>
-                            <SelectContent>
-                              <SelectItem value="desc">Descending</SelectItem>
-                              <SelectItem value="asc">Ascending</SelectItem>
-                            </SelectContent>
-                          </Select>
-                        </div>
-                        <div className="grid grid-cols-2 gap-2 pt-1">
-                          <Button type="button" variant="outline" size="sm" onClick={() => setIsSortMenuOpen(false)}>
-                            Cancel
-                          </Button>
-                          <Button type="button" size="sm" onClick={handleSortChange}>
-                            Apply
-                          </Button>
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="min-w-28"
+                  onClick={() => {
+                    setSortByInput(activeSortBy);
+                    setSortOrderInput(activeSortOrder);
+                    setIsSortMenuOpen((current) => !current);
+                  }}
+                >
+                  <ArrowUpDown className="h-4 w-4" />
+                  Sort
+                </Button>
 
                 <Button
                   variant="outline"
@@ -934,6 +887,52 @@ export function OrganizerGalleryShell({ eventId }: OrganizerGalleryShellProps) {
                 >
                   <RefreshCw className={`h-4 w-4 ${isGalleryLoading ? 'animate-spin' : ''}`} />
                 </Button>
+
+                {isSortMenuOpen && (
+                  <div className="absolute right-0 top-[calc(100%+0.5rem)] z-30 w-full rounded-lg border bg-popover p-3 shadow-md sm:w-72">
+                    <div className="space-y-3">
+                      <div className="space-y-1">
+                        <Label htmlFor="sort-by">Sort by</Label>
+                        <Select
+                          value={sortByInput}
+                          onValueChange={(value: string) => setSortByInput(value as GallerySortBy)}
+                        >
+                          <SelectTrigger id="sort-by">
+                            <SelectValue placeholder="Sort by" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="uploaded_at">Uploaded date</SelectItem>
+                            <SelectItem value="uploader">Guest name</SelectItem>
+                            <SelectItem value="tag">Tag</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div className="space-y-1">
+                        <Label htmlFor="sort-direction">Order</Label>
+                        <Select
+                          value={sortOrderInput}
+                          onValueChange={(value: string) => setSortOrderInput(value as GallerySortOrder)}
+                        >
+                          <SelectTrigger id="sort-direction">
+                            <SelectValue placeholder="Order" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="desc">Descending</SelectItem>
+                            <SelectItem value="asc">Ascending</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div className="grid grid-cols-2 gap-2 pt-1">
+                        <Button type="button" variant="outline" size="sm" onClick={() => setIsSortMenuOpen(false)}>
+                          Cancel
+                        </Button>
+                        <Button type="button" size="sm" onClick={handleSortChange}>
+                          Apply
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           </CardHeader>
